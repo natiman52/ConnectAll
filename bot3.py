@@ -16,7 +16,7 @@ BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE"  # Replace with act
 ADMIN_ID = 5397131005  # Replace with your user ID
 
 # New configuration variables
-MIN_WITHDRAWAL = 20  # Minimum withdrawal amount
+MIN_WITHDRAWAL = 35  # Minimum withdrawal amount
 ADMIN_USERNAME = "@Adey_support"  # Replace with actual admin username
 
 REQUIRED_CHANNELS = [
