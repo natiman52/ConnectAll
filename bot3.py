@@ -37,6 +37,7 @@ logging.basicConfig(
 
 # Database setup
 def init_db():
+    
     conn = sqlite3.connect(os.path.join(pathlib.Path(__file__).parent.resolve(),"referral_bot.db"))
     cursor = conn.cursor()
     
@@ -116,7 +117,7 @@ def init_db():
     conn.close()
 
 def get_db_connection():
-    return sqlite3.connect('referral_bot.db')
+    return sqlite3.connect(os.path.join(pathlib.Path(__file__).parent.resolve(),"referral_bot.db"))
 
 def generate_referral_code(user_id):
     return f"REF{user_id}{secrets.token_hex(3).upper()}"
