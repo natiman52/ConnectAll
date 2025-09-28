@@ -7,6 +7,7 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 import secrets
 from datetime import datetime
 from telegram import ReplyKeyboardRemove
+import pathlib
 import asyncio  # Add this line with other imports
 
 
@@ -36,7 +37,7 @@ logging.basicConfig(
 
 # Database setup
 def init_db():
-    conn = sqlite3.connect('referral_bot.db')
+    conn = sqlite3.connect(os.path.join(pathlib.Path(__file__).parent.resolve(),"referral_bot.db"))
     cursor = conn.cursor()
     
     cursor.execute('''
