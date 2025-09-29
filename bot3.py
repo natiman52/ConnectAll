@@ -7,7 +7,6 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 import secrets
 from datetime import datetime
 from telegram import ReplyKeyboardRemove
-import pathlib
 import asyncio  # Add this line with other imports
 
 
@@ -21,6 +20,7 @@ ADMIN_USERNAME = "@Adey_support"  # Replace with actual admin username
 
 REQUIRED_CHANNELS = [
     {"username": "@Yemesahft_Alem", "name": "የመጻሕፍት ዓለም"},
+    {"username": "@history_ethiopian", "name": "አስገራሚ ታሪኮች"},
 ]
 
 CHANNEL_JOIN_REWARD = 0.2
@@ -30,6 +30,7 @@ REFERRAL_REWARD = 1
 COST_PER_SUBSCRIBER = 0.5  # $0.10 per subscriber
 JOIN_CHANNEL_REWARD = 0.2  # $5 reward for joining a channel
 
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -37,9 +38,9 @@ logging.basicConfig(
 
 # Database setup
 def init_db():
-    
-    conn = sqlite3.connect(os.path.join(pathlib.Path(__file__).parent.resolve(),"referral_bot.db"))
+    conn = sqlite3.connect('referral_bot.db')
     cursor = conn.cursor()
+    
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -52,6 +53,14 @@ def init_db():
             balance INTEGER DEFAULT 0,
             total_referrals INTEGER DEFAULT 0,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value REAL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -112,15 +121,254 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
+
+    # New table for required channels
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS required_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Insert default required channels if they don't exist
+    default_channels = [
+        {"username": "@Yemesahft_Alem", "name": "የመጻሕፍት ዓለም"},
+        {"username": "@history_ethiopian", "name": "አስገራሚ ታሪኮች"},
+    ]
+    
+    for channel in default_channels:
+        cursor.execute('''
+            INSERT OR IGNORE INTO required_channels (username, name)
+            VALUES (?, ?)
+        ''', (channel["username"], channel["name"]))
     
     conn.commit()
     conn.close()
+    load_bot_settings()
+    load_required_channels()  # Load channels from database
+
+def load_required_channels():
+    """Load required channels from database into global variable"""
+    global REQUIRED_CHANNELS
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT username, name FROM required_channels ORDER BY created_at')
+    channels = cursor.fetchall()
+    conn.close()
+    
+    REQUIRED_CHANNELS = [{"username": row[0], "name": row[1]} for row in channels]
 
 def get_db_connection():
-    return sqlite3.connect(os.path.join(pathlib.Path(__file__).parent.resolve(),"referral_bot.db"))
+    return sqlite3.connect('referral_bot.db')
 
 def generate_referral_code(user_id):
     return f"REF{user_id}{secrets.token_hex(3).upper()}"
+
+
+def load_bot_settings():
+    """Load bot settings from database into global variables"""
+    global MIN_WITHDRAWAL, COST_PER_SUBSCRIBER, JOIN_CHANNEL_REWARD, REFERRAL_REWARD
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT key, value FROM bot_settings')
+    settings = cursor.fetchall()
+    conn.close()
+    
+    for key, value in settings:
+        if key == 'MIN_WITHDRAWAL':
+            MIN_WITHDRAWAL = value
+        elif key == 'COST_PER_SUBSCRIBER':
+            COST_PER_SUBSCRIBER = value
+        elif key == 'JOIN_CHANNEL_REWARD':
+            JOIN_CHANNEL_REWARD = value
+        elif key == 'REFERRAL_REWARD':
+            REFERRAL_REWARD = value
+
+def update_bot_setting(key: str, value: float):
+    """Update a bot setting in the database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO bot_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+    ''', (key, value))
+    
+    conn.commit()
+    conn.close()
+    
+    # Reload settings to update global variables
+    load_bot_settings()
+
+async def set_min_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set minimum withdrawal amount"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /set_min_withdrawal <amount>\n\n"
+            "Example: <code>/set_min_withdrawal 25</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        global MIN_WITHDRAWAL
+        MIN_WITHDRAWAL = float(context.args[0])
+        await update.message.reply_text(f"✅ Minimum withdrawal amount set to {MIN_WITHDRAWAL} ብር")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
+
+async def set_cost_per_subscriber(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set cost per subscriber for advertising"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /set_cost_per_subscriber <amount>\n\n"
+            "Example: <code>/set_cost_per_subscriber 0.75</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        global COST_PER_SUBSCRIBER
+        COST_PER_SUBSCRIBER = float(context.args[0])
+        await update.message.reply_text(f"✅ Cost per subscriber set to {COST_PER_SUBSCRIBER} ብር")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
+
+async def set_join_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set channel join reward amount"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /set_join_reward <amount>\n\n"
+            "Example: <code>/set_join_reward 0.3</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        global JOIN_CHANNEL_REWARD
+        JOIN_CHANNEL_REWARD = float(context.args[0])
+        await update.message.reply_text(f"✅ Channel join reward set to {JOIN_CHANNEL_REWARD} ብር")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
+
+async def set_referral_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set referral reward amount"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /set_referral_reward <amount>\n\n"
+            "Example: <code>/set_referral_reward 1.5</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        global REFERRAL_REWARD
+        REFERRAL_REWARD = float(context.args[0])
+        await update.message.reply_text(f"✅ Referral reward set to {REFERRAL_REWARD} ብር")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
+
+async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current bot settings"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    text = (
+        "⚙️ <b>Current Bot Settings</b>\n\n"
+        f"💰 <b>Minimum Withdrawal:</b> {MIN_WITHDRAWAL} ብር\n"
+        f"📢 <b>Cost Per Subscriber:</b> {COST_PER_SUBSCRIBER} ብር\n"
+        f"🎯 <b>Channel Join Reward:</b> {JOIN_CHANNEL_REWARD} ብር\n"
+        f"👥 <b>Referral Reward:</b> {REFERRAL_REWARD} ብር\n\n"
+        "<b>Commands to change:</b>\n"
+        "<code>/set_min_withdrawal &lt;amount&gt;</code>\n"
+        "<code>/set_cost_per_subscriber &lt;amount&gt;</code>\n"
+        "<code>/set_join_reward &lt;amount&gt;</code>\n"
+        "<code>/set_referral_reward &lt;amount&gt;</code>\n\n"
+        "<i>Note: Changes will reset when bot restarts</i>"
+    )
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def pending_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all pending withdrawal requests with copyable phone numbers"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT wr.id, wr.amount, wr.phone_number, u.username, u.first_name, wr.created_at
+        FROM withdrawal_requests wr
+        JOIN users u ON wr.user_id = u.user_id
+        WHERE wr.status = 'pending'
+        ORDER BY wr.created_at DESC
+    ''')
+    pending_requests = cursor.fetchall()
+    conn.close()
+    
+    if not pending_requests:
+        await update.message.reply_text("✅ No pending withdrawal requests.")
+        return
+    
+    # Send each request as a separate message for easy copying
+    for req in pending_requests:
+        req_id, amount, phone, username, first_name, created = req
+        user_display = f"@{username}" if username else (first_name or f"User")
+        created_date = created[:16] if created else "Unknown"
+        
+        # Format phone number in code block for easy copying
+        phone_formatted = f"<code>{phone}</code>"
+        
+        message_text = (
+            f"⏳ <b>Pending Withdrawal #{req_id}</b>\n\n"
+            f"👤 User: {user_display}\n"
+            f"💰 Amount: {amount} birr\n"
+            f"📱 Phone: {phone_formatted}\n"
+            f"🕒 Created: {created_date}\n\n"
+            f"<i>Tap and hold the phone number to copy</i>"
+        )
+        
+        await update.message.reply_text(
+            message_text,
+            parse_mode="HTML"
+        )
+    
+    # Send summary
+    await update.message.reply_text(
+        f"📊 <b>Summary</b>\n\n"
+        f"Total pending withdrawals: {len(pending_requests)}\n"
+        f"Total amount: {sum(req[1] for req in pending_requests)} birr",
+        parse_mode="HTML"
+    )
 
 async def check_channel_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -224,6 +472,7 @@ async def change_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def edit_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow user to edit their own phone number"""
     user_id = update.effective_user.id
     
     conn = get_db_connection()
@@ -234,17 +483,21 @@ async def edit_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result and result[0]:
         old_phone = result[0]
         await update.message.reply_text(
-            f"📱 Your current phone number is: {old_phone}\n\n"
-            f"Send a new phone number using the button below to update it."
+            f"📱 Your current phone number is: <code>{old_phone}</code>\n\n"
+            f"To change it, click the button below to share your new phone number:",
+            parse_mode="HTML"
         )
     else:
-        await update.message.reply_text("You don't have a phone number saved yet. Please send one now.")
+        await update.message.reply_text(
+            "You don't have a phone number saved yet.\n\n"
+            "Please share your phone number using the button below:"
+        )
     
     # Show contact sharing button
     contact_button = KeyboardButton("📱 Share Phone Number", request_contact=True)
     reply_markup = ReplyKeyboardMarkup([[contact_button]], resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(
-        "Click the button below to send your new phone number:",
+        "Click the button below to send your phone number:",
         reply_markup=reply_markup
     )
 
@@ -256,32 +509,61 @@ async def add_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if len(context.args) < 2:
         await update.message.reply_text(
-            "Usage: /add_money <user_id> <amount>\n\n"
-            "Example: <code>/add_money 123456789 50</code>",
+            "Usage: /add_money <user_id OR @username> <amount>\n\n"
+            "Examples:\n"
+            "<code>/add_money 123456789 50</code>\n"
+            "<code>/add_money @username 100</code>",
             parse_mode="HTML"
         )
         return
     
+    user_identifier = context.args[0]
+    
     try:
-        user_id = int(context.args[0])
         amount = float(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ Please provide a valid user_id and amount.")
+        await update.message.reply_text("❌ Please provide a valid amount.")
         return
 
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # Check if input is username (starts with @) or user ID
+    if user_identifier.startswith('@'):
+        # Search by username (remove the @)
+        username = user_identifier[1:]
+        cursor.execute("SELECT user_id, username FROM users WHERE username = ?", (username,))
+    else:
+        # Search by user ID
+        try:
+            user_id = int(user_identifier)
+            cursor.execute("SELECT user_id, username FROM users WHERE user_id = ?", (user_id,))
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid user ID or @username.")
+            conn.close()
+            return
+
+    user = cursor.fetchone()
+
+    if not user:
+        await update.message.reply_text(f"❌ No user found with identifier: {user_identifier}")
+        conn.close()
+        return
+
+    user_id, username = user
+
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
     
     if cursor.rowcount == 0:
-        await update.message.reply_text(f"❌ No user found with ID {user_id}.")
+        await update.message.reply_text(f"❌ Error updating balance for user {user_identifier}.")
     else:
         conn.commit()
-        await update.message.reply_text(f"✅ Added ${amount} to user {user_id}'s balance.")
+        await update.message.reply_text(f"✅ Added {amount} ብር to @{username if username else 'N/A'} (ID: {user_id})'s balance.")
         try:
             await context.bot.send_message(user_id, f"💰 አድሚን {amount} ያህል ብር ወደ balance አስገብቶሎታል")
         except:
             pass  # Ignore if we can't message the user
+    
     conn.close()
 
 async def remove_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,33 +574,52 @@ async def remove_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if len(context.args) < 2:
         await update.message.reply_text(
-            "Usage: /remove_money <user_id> <amount>\n\n"
-            "Example: <code>/remove_money 123456789 20</code>",
+            "Usage: /remove_money <user_id OR @username> <amount>\n\n"
+            "Examples:\n"
+            "<code>/remove_money 123456789 20</code>\n"
+            "<code>/remove_money @username 50</code>",
             parse_mode="HTML"
         )
         return
     
+    user_identifier = context.args[0]
+    
     try:
-        user_id = int(context.args[0])
         amount = float(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ Please provide a valid user_id and amount.")
+        await update.message.reply_text("❌ Please provide a valid user_id/username and amount.")
         return
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+
+    # Check if input is username (starts with @) or user ID
+    if user_identifier.startswith('@'):
+        # Search by username (remove the @)
+        username = user_identifier[1:]
+        cursor.execute("SELECT user_id, username, balance FROM users WHERE username = ?", (username,))
+    else:
+        # Search by user ID
+        try:
+            user_id = int(user_identifier)
+            cursor.execute("SELECT user_id, username, balance FROM users WHERE user_id = ?", (user_id,))
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid user ID or @username.")
+            conn.close()
+            return
+
     result = cursor.fetchone()
 
     if not result:
-        await update.message.reply_text(f"❌ No user found with ID {user_id}.")
+        await update.message.reply_text(f"❌ No user found with identifier: {user_identifier}.")
         conn.close()
         return
 
-    current_balance = result[0]
+    user_id, username, current_balance = result
+
     if current_balance < amount:
         await update.message.reply_text(
-            f"❌ Cannot remove ${amount}. User only has ${current_balance}."
+            f"❌ Cannot remove {amount} ብር. @{username if username else 'N/A'} only has {current_balance} ብር."
         )
         conn.close()
         return
@@ -327,7 +628,7 @@ async def remove_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Removed ${amount} from user {user_id}'s balance.")
+    await update.message.reply_text(f"✅ Removed {amount} ብር from @{username if username else 'N/A'} (ID: {user_id})'s balance.")
     try:
         await context.bot.send_message(user_id, f"⚠️ {amount} ብር ከአካውንቶ በአድሚን ተቀንሷል.")
     except:
@@ -362,7 +663,7 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not is_member:
         await query.edit_message_text(
-            f"❌ ሁሉንም ቻናል አልተቀላቀሉም። እባክዎ {channel['name']} ({channel['username']}) ይቀላቀሉና እንደገና /start ብለው ይላኩ ።"
+            f"❌ ሁሉንም ቻናል አልተቀላቀሉም። እባክዎ ለመቀላቀል /start ብለው ይላኩ ።"
         )
         return
     
@@ -672,7 +973,7 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if balance < MIN_WITHDRAWAL:
         await update.message.reply_text(
-            f"❌ ትንሹ ማው {MIN_WITHDRAWAL} birr\n\n"
+            f"❌ ትንሹ ማውጣት የሚቻለው {MIN_WITHDRAWAL} birr\n\n"
             f"Your current balance: {balance} birr\n"
             f"You need {MIN_WITHDRAWAL - balance} birr more to withdraw.",
             parse_mode="HTML"
@@ -819,7 +1120,7 @@ async def handle_withdrawal_confirmation(update: Update, context: ContextTypes.D
                 f"💳 <b>New Withdrawal Request</b>\n\n"
                 f"• User: {query.from_user.mention_html()}\n"
                 f"• Amount: {amount} birr\n"
-                f"• Phone Number: {phone_number}\n"
+                f"📱 Phone: <code>{phone_number}</code>\n"
                 f"• User ID: {user_id}\n"
                 f"• Request ID: {request_id}\n\n"
                 f"Please confirm or cancel this withdrawal request:",
@@ -1019,32 +1320,45 @@ async def clear_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(context.args) < 1:
         await update.message.reply_text(
-            "Usage: /clear_balance <user_id>\n\n"
-            "Example: <code>/clear_balance 123456789</code>",
+            "Usage: /clear_balance <user_id OR @username>\n\n"
+            "Examples:\n"
+            "<code>/clear_balance 123456789</code>\n"
+            "<code>/clear_balance @username</code>",
             parse_mode="HTML"
         )
         return
 
-    try:
-        user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Please provide a valid user_id.")
-        return
+    user_identifier = context.args[0]
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+
+    # Check if input is username (starts with @) or user ID
+    if user_identifier.startswith('@'):
+        # Search by username (remove the @)
+        username = user_identifier[1:]
+        cursor.execute("SELECT user_id, username, balance FROM users WHERE username = ?", (username,))
+    else:
+        # Search by user ID
+        try:
+            user_id = int(user_identifier)
+            cursor.execute("SELECT user_id, username, balance FROM users WHERE user_id = ?", (user_id,))
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid user ID or @username.")
+            conn.close()
+            return
+
     result = cursor.fetchone()
 
     if not result:
-        await update.message.reply_text(f"❌ No user found with ID {user_id}.")
+        await update.message.reply_text(f"❌ No user found with identifier: {user_identifier}.")
         conn.close()
         return
 
-    old_balance = result[0]
+    user_id, username, old_balance = result
 
     if old_balance == 0:
-        await update.message.reply_text(f"ℹ️ User {user_id} already has $0 balance.")
+        await update.message.reply_text(f"ℹ️ @{username if username else 'N/A'} already has 0 ብር balance.")
         conn.close()
         return
 
@@ -1052,7 +1366,7 @@ async def clear_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Cleared user {user_id}'s balance (removed ${old_balance}).")
+    await update.message.reply_text(f"✅ Cleared @{username if username else 'N/A'} (ID: {user_id})'s balance (removed {old_balance} ብር).")
 
     # Notify user (optional)
     try:
@@ -1135,33 +1449,48 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(context.args) < 1:
         await update.message.reply_text(
-            "Usage: /user_stats <user_id>\n\n"
-            "Example: <code>/user_stats 123456789</code>",
+            "Usage: /user_stats <user_id OR @username>\n\n"
+            "Examples:\n"
+            "<code>/user_stats 123456789</code>\n"
+            "<code>/user_stats @username</code>",
             parse_mode="HTML"
         )
         return
 
-    try:
-        user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Please provide a valid user_id.")
-        return
-
+    user_identifier = context.args[0]
+    
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT username, first_name, last_name, phone_number, balance, total_referrals, referral_code, joined_at
-        FROM users WHERE user_id = ?
-    """, (user_id,))
+    # Check if input is username (starts with @) or user ID
+    if user_identifier.startswith('@'):
+        # Search by username (remove the @)
+        username = user_identifier[1:]
+        cursor.execute("""
+            SELECT user_id, username, first_name, last_name, phone_number, balance, total_referrals, referral_code, joined_at
+            FROM users WHERE username = ?
+        """, (username,))
+    else:
+        # Search by user ID
+        try:
+            user_id = int(user_identifier)
+            cursor.execute("""
+                SELECT user_id, username, first_name, last_name, phone_number, balance, total_referrals, referral_code, joined_at
+                FROM users WHERE user_id = ?
+            """, (user_id,))
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid user ID or @username.")
+            conn.close()
+            return
+
     user = cursor.fetchone()
 
     if not user:
-        await update.message.reply_text(f"❌ No user found with ID {user_id}.")
+        await update.message.reply_text(f"❌ No user found with identifier: {user_identifier}")
         conn.close()
         return
 
-    username, first_name, last_name, phone_number, balance, total_referrals, referral_code, joined_at = user
+    user_id, username, first_name, last_name, phone_number, balance, total_referrals, referral_code, joined_at = user
 
     cursor.execute("SELECT COUNT(*), COALESCE(SUM(earned_amount), 0) FROM referrals WHERE referrer_id = ?", (user_id,))
     referral_count, total_earned = cursor.fetchone()
@@ -2313,7 +2642,6 @@ async def handle_desired_subscribers(update: Update, context: ContextTypes.DEFAU
             channel_title = f"@{channel_username}"
         
         # Create confirmation inline keyboard
-        # Create confirmation inline keyboard
         keyboard = [
             [InlineKeyboardButton("✅ Confirm Advertisement", callback_data="confirm_ad")],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_ad")]
@@ -2324,13 +2652,14 @@ async def handle_desired_subscribers(update: Update, context: ContextTypes.DEFAU
             f"📢 <b>Advertisement Confirmation</b>\n\n"
             f"<b>Channel:</b> {channel_title}\n"
             f"<b>Subscribers Requested:</b> {desired_subscribers}\n"
-            f"<b>Cost per Subscriber:</b> {COST_PER_SUBSCRIBER}\n"
-            f"<b>ጠቅላላ ክፍያ:</b> {total_cost:.2f}\n\n"
+            f"<b>Cost per Subscriber:</b> {COST_PER_SUBSCRIBER} ብር\n"
+            f"<b>ጠቅላላ ክፍያ:</b> {total_cost:.2f} ብር\n"
+            f"<b>የአሁን የገንዘብ መጠን:</b> {user_balance:.2f} ብር\n"
+            f"<b>ካስተዋወቁ በኋላ የሚቀር:</b> {user_balance - total_cost:.2f} ብር\n\n"
             f"Please confirm your advertisement:",
             reply_markup=reply_markup,
             parse_mode="HTML"
         )
-
         
     except ValueError:
         await update.message.reply_text("❌ Please enter a valid number (e.g., 100):")
@@ -2361,10 +2690,36 @@ async def handle_advertisement_confirmation(update: Update, context: ContextType
         except:
             channel_title = f"@{channel_username}"
         
-        # Save advertisement to database
+        # Check user balance again before proceeding
         conn = get_db_connection()
         cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
         
+        if not result:
+            await query.edit_message_text("❌ User not found in database.")
+            conn.close()
+            context.user_data.clear()
+            return
+        
+        user_balance = result[0]
+        
+        if user_balance < total_cost:
+            await query.edit_message_text(
+                f"❌ <b>Insufficient Balance</b>\n\n"
+                f"Your balance is now {user_balance:.2f} birr, but you need {total_cost:.2f} birr.\n\n"
+                f"Please deposit more funds and try again.",
+                parse_mode="HTML"
+            )
+            conn.close()
+            context.user_data.clear()
+            return
+        
+        # DEDUCT THE COST FROM USER'S BALANCE
+        cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', 
+                      (total_cost, user_id))
+        
+        # Save advertisement to database
         cursor.execute('''
             INSERT INTO advertisements (advertiser_id, type, channel_link, channel_username, 
                                      desired_subscribers, cost, is_bot_admin)
@@ -2376,16 +2731,15 @@ async def handle_advertisement_confirmation(update: Update, context: ContextType
         conn.close()
         
         # Notify admin
-        # NEW (just notify admin)
         await context.bot.send_message(
             ADMIN_ID,
             f"📢 New channel advertisement created!\n\n"
-            f"Advertiser:(ID: {user_id})\n"
+            f"Advertiser: (ID: {user_id})\n"
             f"Channel: @{channel_username}\n"
             f"Target Subscribers: {desired_subscribers}\n"
             f"Cost: {total_cost} ብር\n"
+            f"Paid from balance: ✅"
         )
-
         
         await query.edit_message_text(
             f"✅ <b>Advertisement Submitted!</b>\n\n"
@@ -2393,13 +2747,19 @@ async def handle_advertisement_confirmation(update: Update, context: ContextType
             f"<b>ማብራሪያ:</b>\n"
             f"• ቻናል: {channel_title}\n"
             f"• የሰው ብዛት: {desired_subscribers}\n"
-            f"• ክፍያ: {total_cost:.2f} ብር\n\n"
+            f"• ክፍያ: {total_cost:.2f} ብር\n"
+            f"• አዲሱ የገንዘብ መጠን: {user_balance - total_cost:.2f} ብር\n\n"
             f"እኛን ስለመረጡ እናመሰግናለን",
             parse_mode="HTML"
         )
         
         # Clear context data
         context.user_data.clear()
+        
+    elif query.data == "cancel_ad":
+        await query.edit_message_text("❌ Advertisement cancelled.")
+        context.user_data.clear()
+        await show_main_menu_from_callback(update, context)
         
     elif query.data == "cancel_ad":
         await query.edit_message_text("❌ Advertisement cancelled.")
@@ -2528,6 +2888,117 @@ async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DE
         context.user_data.pop('broadcast_message', None)
 
 
+async def edit_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to edit any user's phone number"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /edit_user_phone <user_id OR @username> <new_phone_number>\n\n"
+            "Examples:\n"
+            "<code>/edit_user_phone 123456789 +251912345678</code>\n"
+            "<code>/edit_user_phone @username +251912345678</code>\n\n"
+            "Note: Phone number should be in international format (with +)",
+            parse_mode="HTML"
+        )
+        return
+    
+    user_identifier = context.args[0]
+    new_phone_number = " ".join(context.args[1:])
+    
+    # Basic phone number validation
+    if not new_phone_number.startswith('+'):
+        await update.message.reply_text(
+            "❌ Phone number must be in international format starting with +\n"
+            "Example: +251912345678"
+        )
+        return
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if phone number already exists for another user
+    cursor.execute('SELECT user_id, username FROM users WHERE phone_number = ?', (new_phone_number,))
+    existing_user = cursor.fetchone()
+    
+    if existing_user:
+        existing_user_id, existing_username = existing_user
+        if str(existing_user_id) != user_identifier and (not user_identifier.startswith('@') or existing_username != user_identifier[1:]):
+            await update.message.reply_text(
+                f"❌ This phone number is already registered to another user:\n"
+                f"User ID: {existing_user_id}\n"
+                f"Username: @{existing_username if existing_username else 'N/A'}\n\n"
+                f"Please use a different phone number."
+            )
+            conn.close()
+            return
+    
+    # Find the user
+    if user_identifier.startswith('@'):
+        # Search by username
+        username = user_identifier[1:]
+        cursor.execute('SELECT user_id, username, phone_number FROM users WHERE username = ?', (username,))
+    else:
+        # Search by user ID
+        try:
+            user_id = int(user_identifier)
+            cursor.execute('SELECT user_id, username, phone_number FROM users WHERE user_id = ?', (user_id,))
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid user ID or @username.")
+            conn.close()
+            return
+    
+    user = cursor.fetchone()
+    
+    if not user:
+        await update.message.reply_text(f"❌ No user found with identifier: {user_identifier}")
+        conn.close()
+        return
+    
+    user_id, username, old_phone = user
+    
+    # Update the phone number
+    cursor.execute('UPDATE users SET phone_number = ? WHERE user_id = ?', (new_phone_number, user_id))
+    
+    if cursor.rowcount == 0:
+        await update.message.reply_text(f"❌ Error updating phone number for user {user_identifier}.")
+    else:
+        conn.commit()
+        
+        # Format the response
+        user_display = f"@{username}" if username else f"User {user_id}"
+        old_phone_display = old_phone if old_phone else "Not set"
+        
+        await update.message.reply_text(
+            f"✅ Phone number updated successfully!\n\n"
+            f"👤 User: {user_display}\n"
+            f"🆔 User ID: {user_id}\n"
+            f"📱 Old Phone: {old_phone_display}\n"
+            f"📱 New Phone: {new_phone_number}\n\n"
+            f"The user's withdrawal phone number has been updated."
+        )
+        
+        # Notify the user
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"📱 <b>ስልክ ቁጥሮ በተሳካ ሁኔታ ተቀይሯል</b>\n\n"
+                f"የተመዘገቡበት ስልክቁጥር አሁን በአድሚን ተቀይሯል:\n\n"
+                f"<b>የድሮ ቁጥር:</b> {old_phone_display}\n"
+                f"<b>አዲሱ ቁጥር:</b> {new_phone_number}\n\n"
+                f"ለወደፊቱ ወጪ ሲያደርጉ ገንዘቦ የሚገባሎት በዚህ ስልክ ቁጥር ይሆናል\n"
+                f"ይህ ነገር እርሶ ያዘዙት ካልሆነ አሁኑኑ እኛን ያናግሩን @Adey_Support",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.error(f"Could not notify user {user_id}: {e}")
+            await update.message.reply_text(
+                f"⚠️ Could not send notification to user (they may have blocked the bot)."
+            )
+    
+    conn.close()
 
 
 # Admin advertisement approval handler
@@ -2729,6 +3200,128 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
+async def add_required_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a new required channel"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /add_required_channel <@username> <channel_name>\n\n"
+            "Example: <code>/add_required_channel @MyChannel \"My Channel Name\"</code>\n\n"
+            "Note: Channel username must start with @",
+            parse_mode="HTML"
+        )
+        return
+    
+    username = context.args[0]
+    channel_name = " ".join(context.args[1:])
+    
+    # Validate username format
+    if not username.startswith('@'):
+        await update.message.reply_text("❌ Channel username must start with @")
+        return
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO required_channels (username, name)
+            VALUES (?, ?)
+        ''', (username, channel_name))
+        
+        conn.commit()
+        
+        # Reload channels
+        load_required_channels()
+        
+        await update.message.reply_text(
+            f"✅ Channel added successfully!\n\n"
+            f"📢 <b>Channel:</b> {channel_name}\n"
+            f"🔗 <b>Username:</b> {username}\n\n"
+            f"Total required channels: {len(REQUIRED_CHANNELS)}",
+            parse_mode="HTML"
+        )
+        
+    except sqlite3.IntegrityError:
+        await update.message.reply_text(f"❌ Channel {username} already exists in required channels.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error adding channel: {str(e)}")
+    finally:
+        conn.close()
+
+async def remove_required_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a required channel"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /remove_required_channel <@username>\n\n"
+            "Example: <code>/remove_required_channel @MyChannel</code>\n\n"
+            "Use /list_required_channels to see current channels",
+            parse_mode="HTML"
+        )
+        return
+    
+    username = context.args[0]
+    
+    if not username.startswith('@'):
+        await update.message.reply_text("❌ Channel username must start with @")
+        return
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT name FROM required_channels WHERE username = ?', (username,))
+    channel = cursor.fetchone()
+    
+    if not channel:
+        await update.message.reply_text(f"❌ Channel {username} not found in required channels.")
+        conn.close()
+        return
+    
+    channel_name = channel[0]
+    
+    cursor.execute('DELETE FROM required_channels WHERE username = ?', (username,))
+    conn.commit()
+    conn.close()
+    
+    # Reload channels
+    load_required_channels()
+    
+    await update.message.reply_text(
+        f"✅ Channel removed successfully!\n\n"
+        f"📢 <b>Removed:</b> {channel_name}\n"
+        f"🔗 <b>Username:</b> {username}\n\n"
+        f"Total required channels: {len(REQUIRED_CHANNELS)}",
+        parse_mode="HTML"
+    )
+
+async def list_required_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all required channels"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if not REQUIRED_CHANNELS:
+        await update.message.reply_text("📭 No required channels set.")
+        return
+    
+    channels_text = "📋 <b>Required Channels</b>\n\n"
+    
+    for i, channel in enumerate(REQUIRED_CHANNELS, 1):
+        channels_text += f"{i}. <b>{channel['name']}</b>\n"
+        channels_text += f"   🔗 {channel['username']}\n\n"
+    
+    channels_text += f"Total: {len(REQUIRED_CHANNELS)} channels"
+    
+    await update.message.reply_text(channels_text, parse_mode="HTML")
+
+
 # Add this function to handle leaderboard refresh (updated without buttons)
 async def refresh_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_membership_decorator(update, context):
@@ -2885,6 +3478,17 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/add_money &lt;user_id&gt; &lt;amount&gt;</code> – Add money to user.\n"
         "<code>/remove_money &lt;user_id&gt; &lt;amount&gt;</code> – Remove money from user.\n"
         "<code>/clear_balance &lt;user_id&gt;</code> – Reset user balance to $0.\n\n"
+        "<code>/edit_user_phone &lt;user_id&gt; &lt;phone&gt;</code> – Edit user's phone number.\n\n"
+         "📢 <b>Channel Management</b>\n"
+        "<code>/add_required_channel &lt;@username&gt; &lt;name&gt;</code> – Add required channel.\n"
+        "<code>/remove_required_channel &lt;@username&gt;</code> – Remove required channel.\n"
+        "<code>/list_required_channels</code> – List all required channels.\n\n"
+         "⚙️ <b>Bot Settings</b>\n"
+        "<code>/settings</code> – View current bot settings.\n"
+        "<code>/set_min_withdrawal &lt;amount&gt;</code> – Set minimum withdrawal amount.\n"
+        "<code>/set_cost_per_subscriber &lt;amount&gt;</code> – Set cost per subscriber for ads.\n"
+        "<code>/set_join_reward &lt;amount&gt;</code> – Set channel join reward.\n" 
+        "<code>/set_referral_reward &lt;amount&gt;</code> – Set referral reward.\n\n"
         "📢 <b>Broadcast</b>\n"
         "<code>/broadcast &lt;message&gt;</code> – Send message to all users.\n\n"
         "📊 <b>Bot Statistics</b>\n"
@@ -2911,15 +3515,25 @@ def main():
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("change_phone", change_phone))
     application.add_handler(CommandHandler("channel_stats", channel_stats)) 
+    application.add_handler(CommandHandler("edit_user_phone", edit_user_phone))
     application.add_handler(CommandHandler("edit_phone", edit_phone))  # New command
+    application.add_handler(CommandHandler("set_min_withdrawal", set_min_withdrawal))
+    application.add_handler(CommandHandler("set_cost_per_subscriber", set_cost_per_subscriber))
+    application.add_handler(CommandHandler("set_join_reward", set_join_reward))
+    application.add_handler(CommandHandler("set_referral_reward", set_referral_reward))
+    application.add_handler(CommandHandler("settings", show_settings))
     application.add_handler(CommandHandler("add_money", add_money))
     application.add_handler(CommandHandler("ads_stats", ads_stats))
     application.add_handler(CommandHandler("remove_ad", remove_ad))
     application.add_handler(CommandHandler("remove_money", remove_money))
+    application.add_handler(CommandHandler("add_required_channel", add_required_channel))
+    application.add_handler(CommandHandler("remove_required_channel", remove_required_channel))
+    application.add_handler(CommandHandler("list_required_channels", list_required_channels))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.CONTACT, handle_phone_number_sharing))
     application.add_handler(MessageHandler(filters.PHOTO, handle_admin_screenshot))  # New handler for admin screenshots
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+    
     
     print("Bot is running...")
     application.run_polling()
