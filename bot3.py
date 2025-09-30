@@ -11,11 +11,11 @@ import asyncio  # Add this line with other imports
 
 
 # Configuration
-BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE"  # Replace with actual token
+BOT_TOKEN = "8053732489:AAGAVSAvK4u1Gxy_rbAPDMpTIFE-ciXImq0"  # Replace with actual token
 ADMIN_ID = 5397131005  # Replace with your user ID
 
 # New configuration variables
-MIN_WITHDRAWAL = 35  # Minimum withdrawal amount
+MIN_WITHDRAWAL = 35 # Minimum withdrawal amount
 ADMIN_USERNAME = "@Adey_support"  # Replace with actual admin username
 
 REQUIRED_CHANNELS = [
@@ -404,31 +404,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             VALUES (?, ?, ?, ?, ?)
         ''', (user.id, user.username, user.first_name, user.last_name, referral_code_new))
         
+        # Save referral info, but don't reward yet
         if referral_code:
             cursor.execute('SELECT user_id FROM users WHERE referral_code = ?', (referral_code,))
             referrer = cursor.fetchone()
             
             if referrer:
                 referrer_id = referrer[0]
+                # Save referral with earned_amount = 0 (not yet rewarded)
                 cursor.execute('''
-                    INSERT INTO referrals (referrer_id, referred_id, earned_amount)
-                    VALUES (?, ?, ?)
-                ''', (referrer_id, user.id, REFERRAL_REWARD))
-                
-                cursor.execute('''
-                    UPDATE users 
-                    SET balance = balance + ?, total_referrals = total_referrals + 1 
-                    WHERE user_id = ?
-                ''', (REFERRAL_REWARD, referrer_id))
-                
-                try:
-                    await context.bot.send_message(
-                        referrer_id,
-                        f"🎉 እንኳን ደስ አሎት ፣ {REFERRAL_REWARD} ብር ከreferral አግኝተዋል!"
-                    )
-                except Exception as e:
-                    logging.error(f"Could not notify referrer: {e}")
-    
+                    INSERT OR IGNORE INTO referrals (referrer_id, referred_id, earned_amount)
+                    VALUES (?, ?, 0)
+                ''', (referrer_id, user.id))
+
     conn.commit()
     conn.close()
     
@@ -439,6 +427,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await show_main_menu(update, context)
+
 
 
 async def approve_advertisement(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -663,12 +652,39 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not is_member:
         await query.edit_message_text(
-            f"❌ ሁሉንም ቻናል አልተቀላቀሉም። እባክዎ ለመቀላቀል /start ብለው ይላኩ ።"
+            f"❌ ሁሉንም ቻናል አልተቀላቀሉም። እባክዎ ለመቀላቀል /start ብለው ይላኩ።"
         )
         return
     
+    user_id = query.from_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if this user was referred by someone
+    cursor.execute('SELECT referrer_id, earned_amount FROM referrals WHERE referred_id = ?', (user_id,))
+    referral = cursor.fetchone()
+    
+    if referral:
+        referrer_id, earned_amount = referral
+        # Only give reward if not already given
+        if earned_amount == 0:
+            cursor.execute('UPDATE referrals SET earned_amount = ? WHERE referred_id = ?', (REFERRAL_REWARD, user_id))
+            cursor.execute('UPDATE users SET balance = balance + ?, total_referrals = total_referrals + 1 WHERE user_id = ?', (REFERRAL_REWARD, referrer_id))
+            
+            try:
+                await context.bot.send_message(
+                    referrer_id,
+                    f"🎉 እንኳን ደስ አሎት፣ {REFERRAL_REWARD} ብር ከ referral አግኝተዋል!"
+                )
+            except Exception as e:
+                logging.error(f"Could not notify referrer: {e}")
+    
+    conn.commit()
+    conn.close()
+    
     await query.edit_message_text("✅ Great! You've joined all required channels.")
     await show_main_menu_from_callback(update, context)
+
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
