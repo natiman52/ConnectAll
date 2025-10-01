@@ -11,7 +11,8 @@ import asyncio  # Add this line with other imports
 
 
 # Configuration
-BOT_TOKEN = "8053732489:AAGAVSAvK4u1Gxy_rbAPDMpTIFE-ciXImq0"  # Replace with actual token
+BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE" 
+# Replace with actual token
 ADMIN_ID = 5397131005  # Replace with your user ID
 
 # New configuration variables
