@@ -10,24 +10,20 @@ from telegram import ReplyKeyboardRemove
 import asyncio  # Add this line with other imports
 
 
-
-
 # Configuration
-BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE" 
-# Replace with actual token
+BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE"  # Replace with actual token
 ADMIN_ID = 5397131005  # Replace with your user ID
 
 # New configuration variables
-MIN_WITHDRAWAL = 20 # Minimum withdrawal amount
+MIN_WITHDRAWAL = 20  # Minimum withdrawal amount
 ADMIN_USERNAME = "@Adey_support"  # Replace with actual admin username
 
 REQUIRED_CHANNELS = [
     {"username": "@Yemesahft_Alem", "name": "የመጻሕፍት ዓለም"},
-    {"username": "@history_ethiopian", "name": "አስገራሚ ታሪኮች"},
 ]
 
 CHANNEL_JOIN_REWARD = 0.2
-REFERRAL_REWARD = 1
+REFERRAL_REWARD = 2
 
 # New configuration variables for advertising system
 COST_PER_SUBSCRIBER = 0.5  # $0.10 per subscriber
@@ -138,7 +134,6 @@ def init_db():
     # Insert default required channels if they don't exist
     default_channels = [
         {"username": "@Yemesahft_Alem", "name": "የመጻሕፍት ዓለም"},
-        {"username": "@history_ethiopian", "name": "አስገራሚ ታሪኮች"},
     ]
     
     for channel in default_channels:
@@ -706,7 +701,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             ["➕ Join Channel", "👥 My Referrals"],
             ["💰 My Balance","🏆 Leaderboard","📢 Advertise"],
-            ["ℹ️ Help","📤 Share Referral Link"]  # Added Leaderboard button
+            ["ℹ️ Help","📤 Share Referral Link"],
+            ["💸ገንዘብ አሰራር"]  # Added Leaderboard button
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
@@ -746,7 +742,8 @@ async def show_main_menu_from_callback(update: Update, context: ContextTypes.DEF
         keyboard = [
             ["➕ Join Channel", "👥 My Referrals"],
             ["💰 My Balance","🏆 Leaderboard","📢 Advertise"],
-            ["ℹ️ Help","📤 Share Referral Link"] 
+            ["ℹ️ Help","📤 Share Referral Link"],
+            ["💸ገንዘብ አሰራር"]
         ]
         
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -787,7 +784,10 @@ async def handle_reply_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
     
     elif text == "ℹ️ Help":
         await show_help(update, context)
-    
+
+    elif text == "💸ገንዘብ አሰራር":
+        await show_earning_guide(update, context)
+
     elif text == "🏆 Leaderboard":  # Added Leaderboard handler
         await show_leaderboard(update, context)
     
@@ -815,6 +815,16 @@ async def check_membership_decorator(update: Update, context: ContextTypes.DEFAU
         return False
         
     return True
+
+async def show_earning_guide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_membership_decorator(update, context):
+        return
+    
+    guide_text = (
+        "በዚህ ቦት ላይ እንዴት ገንዘብ መስራት እንደምትችሉ እና ገንዘባችሁት በቴሌብር እንዴት ማውጣት እንደምትችሉ ለማወቅ ይህንን video ይመልከቱ 👉 https://t.me/AdeyChannel/169"
+    )
+    
+    await update.message.reply_text(guide_text)
 
 # Balance and withdrawal system functions
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1118,7 +1128,19 @@ async def handle_withdrawal_confirmation(update: Update, context: ContextTypes.D
         
         balance, phone_number = result
         
-        # Create withdrawal request instead of deducting immediately
+        # Check balance again before deducting
+        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+        current_balance = cursor.fetchone()[0]
+
+        if current_balance < amount:
+            await query.edit_message_text("❌ Insufficient balance. Please try again.")
+            conn.close()
+            return
+
+        # DEDUCT THE AMOUNT IMMEDIATELY when withdrawal is requested
+        cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (amount, user_id))
+
+        # Create withdrawal request
         cursor.execute('''
             INSERT INTO withdrawal_requests (user_id, amount, phone_number, status)
             VALUES (?, ?, ?, 'pending')
@@ -1198,14 +1220,6 @@ async def handle_admin_withdrawal_action(update: Update, context: ContextTypes.D
         user_id, amount, username, phone_number, user_balance = result
         
         # Check if user still has sufficient balance
-        if user_balance < amount:
-            await query.edit_message_text(
-                f"❌ Withdrawal failed. User now has insufficient balance.\n\n"
-                f"• Requested: {amount} birr\n"
-                f"• Current balance: {user_balance} birr"
-            )
-            conn.close()
-            return
         
         # Update withdrawal request status
         cursor.execute('''
@@ -1214,8 +1228,6 @@ async def handle_admin_withdrawal_action(update: Update, context: ContextTypes.D
             WHERE id = ?
         ''', (request_id,))
         
-        # Deduct the amount from user's balance
-        cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (amount, user_id))
         
         conn.commit()
         conn.close()
@@ -1256,6 +1268,8 @@ async def handle_admin_withdrawal_action(update: Update, context: ContextTypes.D
             user_id, amount, username = result
             
             # Update withdrawal request status
+            # Refund the amount to user's balance and update status
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
             cursor.execute("UPDATE withdrawal_requests SET status = 'cancelled' WHERE id = ?", (request_id,))
             conn.commit()
             
@@ -1312,7 +1326,9 @@ async def handle_admin_screenshot_action(update: Update, context: ContextTypes.D
             user_id, amount, username = result
             
             # Update withdrawal request status
-            cursor.execute("UPDATE withdrawal_requests SET status = 'completed', screenshot_sent = 0 WHERE id = ?", (request_id,))
+            # Refund the amount and update status
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+            cursor.execute("UPDATE withdrawal_requests SET status = 'cancelled' WHERE id = ?", (request_id,))
             conn.commit()
             
             # Notify user that payment was sent but no screenshot
@@ -1770,7 +1786,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # First, check if it's one of the main menu buttons
     # Update this line in handle_text_messages function:
-    main_menu_buttons = ["📤 Share Referral Link", "💰 My Balance", "👥 My Referrals", "📢 Advertise", "➕ Join Channel", "🏆 Leaderboard", "ℹ️ Help"]
+    main_menu_buttons = ["📤 Share Referral Link", "💰 My Balance", "👥 My Referrals", "📢 Advertise", "➕ Join Channel", "🏆 Leaderboard", "ℹ️ Help","💸ገንዘብ አሰራር"]
     
     if text in main_menu_buttons:
         # Clear any ongoing flows
@@ -1934,7 +1950,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = f"""
         🤖 <b>ይህንን ቦት እንዴት መጠቀም እንደሚችሉ:</b>
 
-1. <b>የመጋበዣ link በማጋራት</b>: የራሶት ልዩ የሆነውን የመጋበዛ ሊንክ ለሰዎች ሲያጋሩ በእያንዳንዱ ሰው 1 ብር ያገኛሉ ። ብዙ ባጋሩ ቁጥር ብዙ ገንዘብ ያገኛሉ
+1. <b>የመጋበዣ link በማጋራት</b>: የራሶት ልዩ የሆነውን የመጋበዛ ሊንክ ለሰዎች ሲያጋሩ በእያንዳንዱ ሰው {REFERRAL_REWARD} ብር ያገኛሉ ። ብዙ ባጋሩ ቁጥር ብዙ ገንዘብ ያገኛሉ
 2. <b>ቻናሎችን በመቀላቀል</b>: ቻናሎችን በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ከአንድ ቻናል ያገኛሉ 
 3. <b>Advertise</b>:እዚህ ቦት ላይ ቻናሎትን ማስተዋወቅ ይችላሉ
         
@@ -2825,7 +2841,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def send_broadcast_to_users(context: ContextTypes.DEFAULT_TYPE, message_text: str):
-    """Send broadcast message to all users in database"""
+    """Send broadcast messages in parallel without blocking"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -2835,26 +2851,72 @@ async def send_broadcast_to_users(context: ContextTypes.DEFAULT_TYPE, message_te
     conn.close()
     
     total_users = len(users)
+    
+    # Create background task for parallel sending
+    asyncio.create_task(
+        parallel_broadcast_send(context, users, message_text, total_users)
+    )
+    
+    return total_users, 0, 0  # Return immediately
+
+async def parallel_broadcast_send(context: ContextTypes.DEFAULT_TYPE, users, message_text: str, total_users: int):
+    """Send broadcasts in small parallel batches"""
     successful_sends = 0
     failed_sends = 0
     
-    # Send message to each user
-    for user_tuple in users:
-        user_id = user_tuple[0]
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"📢 <b>Announcement</b>\n\n{message_text}",
-                parse_mode="HTML"
-            )
-            successful_sends += 1
-        except Exception as e:
-            logging.error(f"Failed to send broadcast to user {user_id}: {e}")
-            failed_sends += 1
-        # Small delay to avoid rate limiting
-        await asyncio.sleep(0.1)  # This requires asyncio import
+    # Send in batches of 10 to avoid rate limits
+    batch_size = 10
     
-    return total_users, successful_sends, failed_sends
+    for i in range(0, len(users), batch_size):
+        batch = users[i:i + batch_size]
+        
+        # Create tasks for this batch
+        tasks = []
+        for user_tuple in batch:
+            user_id = user_tuple[0]
+            task = send_single_message(context, user_id, message_text)
+            tasks.append(task)
+        
+        # Wait for all tasks in this batch to complete
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Count results
+        for result in results:
+            if result is True:
+                successful_sends += 1
+            else:
+                failed_sends += 1
+        
+        # Small delay between batches
+        await asyncio.sleep(0.5)
+    
+    # Send final results to admin
+    result_text = (
+        f"✅ <b>Broadcast Completed</b>\n\n"
+        f"📊 <b>Results:</b>\n"
+        f"• Total Users: {total_users}\n"
+        f"• Successful: {successful_sends}\n"
+        f"• Failed: {failed_sends}"
+    )
+    
+    await context.bot.send_message(
+        ADMIN_ID,
+        result_text,
+        parse_mode="HTML"
+    )
+
+async def send_single_message(context: ContextTypes.DEFAULT_TYPE, user_id: int, message_text: str):
+    """Send a single message and return success status"""
+    try:
+        await context.bot.send_message(
+            user_id,
+            f"📢 <b>Announcement</b>\n\n{message_text}",
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send broadcast to user {user_id}: {e}")
+        return False
 
 async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle broadcast confirmation from admin"""
@@ -2868,36 +2930,16 @@ async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DE
             await query.edit_message_text("❌ Broadcast message not found.")
             return
         
-        # Show sending progress
-        await query.edit_message_text("🔄 <b>Sending broadcast to all users...</b>", parse_mode="HTML")
-        
-        # Send broadcast
-        total_users, successful_sends, failed_sends = await send_broadcast_to_users(context, message_text)
-        
-        # Send results to admin
-        result_text = (
-            f"✅ <b>Broadcast Completed</b>\n\n"
-            f"📊 <b>Results:</b>\n"
-            f"• Total Users: {total_users}\n"
-            f"• Successful: {successful_sends}\n"
-            f"• Failed: {failed_sends}\n\n"
-            f"💬 <b>Message Sent:</b>\n{message_text}"
-        )
-        
-        await context.bot.send_message(
-            ADMIN_ID,
-            result_text,
-            parse_mode="HTML"
-        )
-        
-        # Update the original message
+        # Show immediate feedback that broadcast started
         await query.edit_message_text(
-            f"✅ <b>Broadcast Sent Successfully!</b>\n\n"
-            f"• Total Users: {total_users}\n"
-            f"• Successful: {successful_sends}\n"
-            f"• Failed: {failed_sends}",
+            "🔄 <b>Broadcast started in background!</b>\n\n"
+            "The bot will continue working normally while sending messages.\n"
+            "You will receive a summary when completed.",
             parse_mode="HTML"
         )
+        
+        # Send broadcast (non-blocking)
+        total_users, successful_sends, failed_sends = await send_broadcast_to_users(context, message_text)
         
         # Clear the stored message
         context.user_data.pop('broadcast_message', None)
