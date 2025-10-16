@@ -14,8 +14,8 @@ import asyncio  # Add this line with other imports
 BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE"  # Replace with actual token
 ADMIN_ID = 5397131005  # Replace with your user ID
 
-HOURLY_BONUS_AMOUNT = 0.999  # 0.999 birr per 3 hours
-HOURLY_BONUS_COOLDOWN = 10800  # 3 hours in seconds (3 * 60 * 60 = 10800)s
+HOURLY_BONUS_AMOUNT = 0.3  # 0.3 birr per hour
+HOURLY_BONUS_COOLDOWN = 3600
 
 # New configuration variables
 MIN_WITHDRAWAL = 20  # Minimum withdrawal amount
@@ -31,6 +31,13 @@ REFERRAL_REWARD = 2
 # New configuration variables for advertising system
 COST_PER_SUBSCRIBER = 0.5  # $0.10 per subscriber
 JOIN_CHANNEL_REWARD = 0.2  # $5 reward for joining a channel
+
+# Lottery configuration
+LOTTERY_CONFIG = {
+    '3': {'price': 3, 'prize': 30, 'required_participants': 2},
+    '5': {'price': 5, 'prize': 50, 'required_participants': 70},
+    '10': {'price': 10, 'prize': 100, 'required_participants': 50}
+}
 
 
 logging.basicConfig(
@@ -143,6 +150,48 @@ def init_db():
         )
     ''')
     
+    # Lottery tables
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS lottery_rounds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lottery_type TEXT,
+            round_number INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'active', -- active, completed
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            winner_user_id INTEGER,
+            UNIQUE(lottery_type, round_number)
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS lottery_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_id INTEGER,
+            user_id INTEGER,
+            tickets_count INTEGER DEFAULT 1,
+            purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (round_id) REFERENCES lottery_rounds (id),
+            FOREIGN KEY (user_id) REFERENCES users (user_id),
+            UNIQUE(round_id, user_id)
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS lottery_winners (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_id INTEGER,
+            user_id INTEGER,
+            lottery_type TEXT,
+            round_number INTEGER,
+            prize_amount REAL,
+            won_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            paid BOOLEAN DEFAULT 0,
+            FOREIGN KEY (round_id) REFERENCES lottery_rounds (id),
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
     # Insert default required channels if they don't exist
     default_channels = [
         {"username": "@Yemesahft_Alem", "name": "የመጻሕፍት ዓለም"},
@@ -153,6 +202,13 @@ def init_db():
             INSERT OR IGNORE INTO required_channels (username, name)
             VALUES (?, ?)
         ''', (channel["username"], channel["name"]))
+    
+    # Initialize lottery rounds if they don't exist
+    for lottery_type in LOTTERY_CONFIG.keys():
+        cursor.execute('''
+            INSERT OR IGNORE INTO lottery_rounds (lottery_type, round_number, status)
+            VALUES (?, 1, 'active')
+        ''', (lottery_type,))
     
     conn.commit()
     conn.close()
@@ -215,6 +271,373 @@ def update_bot_setting(key: str, value: float):
     
     # Reload settings to update global variables
     load_bot_settings()
+
+# Lottery functions
+def get_current_lottery_round(lottery_type):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT id, round_number, status 
+        FROM lottery_rounds 
+        WHERE lottery_type = ? AND status = 'active'
+    ''', (lottery_type,))
+    
+    round_data = cursor.fetchone()
+    conn.close()
+    
+    if round_data:
+        return {'id': round_data[0], 'round_number': round_data[1], 'status': round_data[2]}
+    return None
+
+def get_lottery_stats(lottery_type, round_id=None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if round_id:
+        # Get stats for specific round
+        cursor.execute('''
+            SELECT COUNT(DISTINCT user_id), SUM(tickets_count)
+            FROM lottery_tickets 
+            WHERE round_id = ?
+        ''', (round_id,))
+    else:
+        # Get stats for current active round
+        cursor.execute('''
+            SELECT COUNT(DISTINCT lt.user_id), SUM(lt.tickets_count)
+            FROM lottery_tickets lt
+            JOIN lottery_rounds lr ON lt.round_id = lr.id
+            WHERE lr.lottery_type = ? AND lr.status = 'active'
+        ''', (lottery_type,))
+    
+    stats = cursor.fetchone()
+    conn.close()
+    
+    if stats:
+        return {'participants': stats[0], 'tickets_sold': stats[1] or 0}
+    return {'participants': 0, 'tickets_sold': 0}
+
+def get_lottery_winners(lottery_type, limit=10):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT lw.round_number, u.username, u.user_id, lw.prize_amount, lw.won_at
+        FROM lottery_winners lw
+        JOIN users u ON lw.user_id = u.user_id
+        WHERE lw.lottery_type = ?
+        ORDER BY lw.won_at DESC
+        LIMIT ?
+    ''', (lottery_type, limit))
+    
+    winners = cursor.fetchall()
+    conn.close()
+    
+    return winners
+
+async def handle_lottery_ticket_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE, lottery_type: str):
+    user_id = update.effective_user.id
+    lottery_config = LOTTERY_CONFIG[lottery_type]
+    
+    # Check user balance
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    
+    if not result:
+        await update.message.reply_text("❌ User not found.")
+        conn.close()
+        return
+    
+    balance = result[0]
+    
+    if balance < lottery_config['price']:
+        await update.message.reply_text(
+            f"❌ በቂ ገንዘብ የሎትም!\n\n"
+            f"ያሎት ገንዘብ: {balance} ብር\n"
+            f"የሎተሪ ዋጋ: {lottery_config['price']} ብር\n\n"
+            f"እባክዎ በመጀመሪያ ገንዘብ ያስገቡ"
+        )
+        conn.close()
+        return
+    
+    # Get current round
+    round_data = get_current_lottery_round(lottery_type)
+    if not round_data:
+        await update.message.reply_text("❌ ሎተሪ አልተገኘም። እባክዎ ቆይተው ይሞክሩ")
+        conn.close()
+        return
+    
+    # Check if user already bought a ticket in this round
+    cursor.execute('SELECT tickets_count FROM lottery_tickets WHERE round_id = ? AND user_id = ?', 
+                  (round_data['id'], user_id))
+    existing_ticket = cursor.fetchone()
+    
+    tickets_count = 1
+    if existing_ticket:
+        tickets_count = existing_ticket[0] + 1
+    
+    # Deduct balance and add/update ticket
+    cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', 
+                  (lottery_config['price'], user_id))
+    
+    if existing_ticket:
+        cursor.execute('UPDATE lottery_tickets SET tickets_count = ? WHERE round_id = ? AND user_id = ?',
+                      (tickets_count, round_data['id'], user_id))
+    else:
+        cursor.execute('INSERT INTO lottery_tickets (round_id, user_id, tickets_count) VALUES (?, ?, ?)',
+                      (round_data['id'], user_id, tickets_count))
+    
+    conn.commit()
+    
+    # Get updated stats
+    stats = get_lottery_stats(lottery_type, round_data['id'])
+    
+    conn.close()
+    
+    await update.message.reply_text(
+        f"🎫 <b>የሎተሪ ትኬት ተግዝቷል!</b>\n\n"
+        f"💰 <b>የሎተሪ አይነት:</b> {lottery_type} ብር\n"
+        f"🎯 <b>ዋጋ:</b> {lottery_config['prize']} ብር\n"
+        f"📊 <b>የተገዙ ትኬቶች:</b> {tickets_count}\n"
+        f"👥 <b>አጠቃላይ ተሳታፊዎች:</b> {stats['participants']}\n"
+        f"🎟️ <b>አጠቃላይ ትኬቶች:</b> {stats['tickets_sold']}\n"
+        f"🎯 <b>የሚያሸንፉት:</b> {lottery_config['required_participants']} ሰው ሲያስገቡ\n\n"
+        f"<i>ብዙ ትኬቶች በመግዛት የማሸነፍ እድልዎ ይጨምራል!</i>",
+        parse_mode="HTML"
+    )
+    
+    # Check if we reached required participants
+    if stats['tickets_sold'] >= lottery_config['required_participants']:
+        await draw_lottery_winner(context, lottery_type, round_data)
+
+async def draw_lottery_winner(context: ContextTypes.DEFAULT_TYPE, lottery_type: str, round_data: dict):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get all tickets for this round
+    cursor.execute('''
+        SELECT user_id, tickets_count 
+        FROM lottery_tickets 
+        WHERE round_id = ?
+    ''', (round_data['id'],))
+    
+    tickets = cursor.fetchall()
+    
+    if not tickets:
+        conn.close()
+        return
+    
+    # Create weighted list based on ticket count
+    weighted_users = []
+    for user_id, ticket_count in tickets:
+        weighted_users.extend([user_id] * ticket_count)
+    
+    # Randomly select winner
+    import random
+    winner_user_id = random.choice(weighted_users)
+    
+    # Get winner info
+    cursor.execute('SELECT username, first_name FROM users WHERE user_id = ?', (winner_user_id,))
+    winner_info = cursor.fetchone()
+    winner_username = winner_info[0] if winner_info[0] else winner_info[1]
+    
+    lottery_config = LOTTERY_CONFIG[lottery_type]
+    
+    # Update round status and record winner
+    cursor.execute('''
+        UPDATE lottery_rounds 
+        SET status = 'completed', winner_user_id = ?, completed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ''', (winner_user_id, round_data['id']))
+    
+    cursor.execute('''
+        INSERT INTO lottery_winners (round_id, user_id, lottery_type, round_number, prize_amount)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (round_data['id'], winner_user_id, lottery_type, round_data['round_number'], lottery_config['prize']))
+    
+    # Create new round
+    cursor.execute('''
+        INSERT INTO lottery_rounds (lottery_type, round_number, status)
+        VALUES (?, ?, 'active')
+    ''', (lottery_type, round_data['round_number'] + 1))
+    
+    conn.commit()
+    
+    # Get all participants for this round
+    cursor.execute('SELECT DISTINCT user_id FROM lottery_tickets WHERE round_id = ?', (round_data['id'],))
+    participants = cursor.fetchall()
+    
+    conn.close()
+    
+    # Notify admin
+    winner_text = (
+        f"🎉 <b>ሎተሪ አሸንፎአል!</b>\n\n"
+        f"💰 <b>የሎተሪ አይነት:</b> {lottery_type} ብር\n"
+        f"🔢 <b ዙር:</b> {round_data['round_number']}\n"
+        f"🏆 <b>አሸናፊ:</b> {winner_username}\n"
+        f"🆔 <b>የቴሌግራም አይዲ:</b> {winner_user_id}\n"
+        f"🎁 <b>ሽልማት:</b> {lottery_config['prize']} ብር\n\n"
+        f"እባክዎ ሽልማቱን ለአሸናፊው ያስተላልፉ"
+    )
+    
+    try:
+        await context.bot.send_message(ADMIN_ID, winner_text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Could not notify admin about lottery winner: {e}")
+    
+    # Notify all participants
+    announcement_text = (
+        f"🎉 <b>ሎተሪ ውጤት ተገለጸ!</b>\n\n"
+        f"💰 <b>የሎተሪ አይነት:</b> {lottery_type} ብር\n"
+        f"🔢 <b>ዙር:</b> {round_data['round_number']}\n"
+        f"🏆 <b>አሸናፊ:</b> {winner_username}\n"
+        f"🎁 <b>ሽልማት:</b> {lottery_config['prize']} ብር\n\n"
+        f"አሸናፊው በ24 ሰዓት ውስጥ ሽልማቱን ይቀበላል!\n\n"
+        f"ለሚቀጥለው ዙር እንደገና ይሳተፉ!"
+    )
+    
+    for participant in participants:
+        try:
+            await context.bot.send_message(participant[0], announcement_text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Could not notify participant {participant[0]}: {e}")
+
+async def show_lottery_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_membership_decorator(update, context):
+        return
+    
+    keyboard = [
+        ["የ3 ብር lottery", "የ5 ብር lottery"],
+        ["የ10 ብር lottery", "📊 Main Menu"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    text = (
+        "🎰 <b>የሎተሪ ስርዓት</b>\n\n"
+        "ከታች ካሉት ሎተሪ ውስጥ የፈለጉትን ይምረጡ:\n\n"
+        "🎫 <b>የ3 ብር ሎተሪ</b>\n"
+        "• ዋጋ: 3 ብር\n"
+        "• ሽልማት: 30 ብር\n"
+        "• እጣ የሚወጣው: 100 ሰው ሲገባ \n\n"
+        "🎫 <b>የ5 ብር ሎተሪ</b>\n"
+        "• ዋጋ: 5 ብር\n"
+        "• ሽልማት: 50 ብር\n"
+        "• እጣ የሚወጣው: 70 ሰው ሲገባ\n\n"
+        "🎫 <b>የ10 ብር ሎተሪ</b>\n"
+        "• ዋጋ: 10 ብር\n"
+        "• ሽልማት: 100 ብር\n"
+        "• እጣ የሚወጣው: 50 ሰው ሲገባ\n\n"
+    )
+    
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+
+async def show_lottery_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, lottery_type: str):
+    lottery_config = LOTTERY_CONFIG[lottery_type]
+    round_data = get_current_lottery_round(lottery_type)
+    stats = get_lottery_stats(lottery_type)
+    
+    if not round_data:
+        await update.message.reply_text("❌ ሎተሪ አልተገኘም። እባክዎ ቆይተው ይሞክሩ")
+        return
+    
+    # Check user balance
+    user_id = update.effective_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    balance = result[0] if result else 0
+    conn.close()
+    
+    remaining = lottery_config['required_participants'] - stats['tickets_sold']
+    remaining = max(0, remaining)
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ ሎተሪ ይግዙ", callback_data=f"confirm_lottery_{lottery_type}")],
+        [InlineKeyboardButton("❌ ይቅር", callback_data="cancel_lottery")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        f"🎫 <b>የሎተሪ ማረጋገጫ</b>\n\n"
+        f"💰 <b>የሎተሪ አይነት:</b> {lottery_type} ብር\n"
+        f"🔢 <b ዙር:</b> {round_data['round_number']}\n"
+        f"💵 <b>የትኬት ዋጋ:</b> {lottery_config['price']} ብር\n"
+        f"🎁 <b>ሽልማት:</b> {lottery_config['prize']} ብር\n\n"
+        f"📊 <b>የዛሬው ሁኔታ:</b>\n"
+        f"• 👥 ተሳታፊዎች: {stats['participants']}\n"
+        f"• 🎟️ የተገዙ ትኬቶች: {stats['tickets_sold']}\n"
+        f"• ⏳ የቀሩ ትኬቶች: {remaining}\n\n"
+        f"💰 <b>ያሎት ገንዘብ:</b> {balance} ብር\n\n"
+        f"<i>ብዙ ትኬቶች በመግዛት የማሸነፍ እድልዎ ይጨምራል!</i>"
+    )
+    
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+
+async def lottery_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("3 ብር ሎተሪ", callback_data="lottery_stats_3")],
+        [InlineKeyboardButton("5 ብር ሎተሪ", callback_data="lottery_stats_5")],
+        [InlineKeyboardButton("10 ብር ሎተሪ", callback_data="lottery_stats_10")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "📊 <b>የሎተሪ ስታቲስቲክስ</b>\n\n"
+        "ለማየት የሚፈልጉትን የሎተሪ አይነት ይምረጡ:",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+async def show_lottery_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, lottery_type: str):
+    query = update.callback_query
+    await query.answer()
+    
+    lottery_config = LOTTERY_CONFIG[lottery_type]
+    round_data = get_current_lottery_round(lottery_type)
+    stats = get_lottery_stats(lottery_type)
+    winners = get_lottery_winners(lottery_type, 10)
+    
+    text = f"📊 <b>የ{lottery_type} ብር ሎተሪ ስታቲስቲክስ</b>\n\n"
+    
+    if round_data:
+        remaining = lottery_config['required_participants'] - stats['tickets_sold']
+        remaining = max(0, remaining)
+        
+        text += (
+            f"🔄 <b>የአሁኑ ዙር</b>\n"
+            f"• 🔢 ዙር: {round_data['round_number']}\n"
+            f"• 👥 ተሳታፊዎች: {stats['participants']}\n"
+            f"• 🎟️ የተገዙ ትኬቶች: {stats['tickets_sold']}\n"
+            f"• 🎯 የሚያስፈልጉ: {lottery_config['required_participants']}\n"
+            f"• ⏳ የቀሩ: {remaining}\n\n"
+        )
+    else:
+        text += "🔄 <b>የአሁኑ ዙር:</b> አልተገኘም\n\n"
+    
+    if winners:
+        text += "🏆 <b>ያለፉ አሸናፊዎች</b>\n"
+        for i, (round_num, username, user_id, prize, won_at) in enumerate(winners, 1):
+            user_display = f"@{username}" if username else f"User {user_id}"
+            text += f"{i}. {user_display} - ዙር {round_num} - {prize} ብር\n"
+    else:
+        text += "🏆 <b>ያለፉ አሸናፊዎች:</b> እስካሁን የለም\n"
+    
+    await query.edit_message_text(text, parse_mode="HTML")
+
+async def lottery_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to show lottery statistics"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    await lottery_stats(update, context)
 
 async def set_min_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set minimum withdrawal amount"""
@@ -715,12 +1138,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance, referrals, ref_code = user_data
         referral_link = f"https://t.me/{context.bot.username}?start={ref_code}"
         
-        # Updated reply keyboard with new buttons
+        # Updated reply keyboard with new buttons including Lottery
         keyboard = [
-            ["➕ Join Channel","🎁 3-3-Hourly Bonus"],
+            ["➕ Join Channel","🎁 Hourly Bonus"],
             ["💰 My Balance","🏆 Leaderboard"],
-            ["ℹ️ Help","📤 Share Referral Link","📢 Advertise"],
-            ["💸ገንዘብ አሰራር"]  # Added Leaderboard button
+            ["🎰 Lottery", "📤 Share Referral Link","📢 Advertise"],
+            ["💸ገንዘብ አሰራር"]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
@@ -731,14 +1154,14 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📢 Join Channels - ቻቶችን በመቀላቀል በእያንዳንዱ ቻናል {JOIN_CHANNEL_REWARD} ብር ያገኛሉ
 👨‍🦰 ሰውን በመጋበዝ - ሰዎችን በመጋበዝ በአንድ ሰው {REFERRAL_REWARD} ብር ያገኛሉ
+🎰 Lottery - በሎተሪ በመሳተፍ ትልልቅ ሽልማቶችን ያሸንፉ
 
 💰 <b>ያሎት ገንዘብ:</b> {balance} ብር
 👥 <b>የጋበዙት ሰው ብዛት:</b> {referrals}
 
 🔗 <b>የእርሶ የመጋበዣ link:</b>
 <code>{referral_link}</code>
-                     
-                        """
+                      """
         
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
@@ -756,12 +1179,12 @@ async def show_main_menu_from_callback(update: Update, context: ContextTypes.DEF
         balance, referrals, ref_code = user_data
         referral_link = f"https://t.me/{context.bot.username}?start={ref_code}"
         
-        # Updated reply keyboard with new buttons
+        # Updated reply keyboard with new buttons including Lottery
         keyboard = [
-            ["➕ Join Channel","🎁 3-Hourly Bonus" ],
+            ["➕ Join Channel","🎁 Hourly Bonus"],
             ["💰 My Balance","🏆 Leaderboard"],
-            ["ℹ️ Help","📤 Share Referral Link","📢 Advertise"],
-            ["💸ገንዘብ አሰራር"]  # Added Leaderboard button
+            ["🎰 Lottery", "📤 Share Referral Link","📢 Advertise"],
+            ["💸ገንዘብ አሰራር"]
         ]
         
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -773,6 +1196,7 @@ async def show_main_menu_from_callback(update: Update, context: ContextTypes.DEF
 
 📢 Join Channels - ቻቶችን በመቀላቀል በእያንዳንዱ ቻናል {JOIN_CHANNEL_REWARD} ብር ያገኛሉ
 👨‍🦰 ሰውን በመጋበዝ - ሰዎችን በመጋበዝ በአንድ ሰው {REFERRAL_REWARD} ብር ያገኛሉ
+🎰 Lottery - በሎተሪ በመሳተፍ ትልልቅ ሽልማቶችን ያሸንፉ
 
 💰 <b>ያሎት ገንዘብ:</b> {balance} ብር
 👥 <b>የጋበዙት ሰው ብዛት:</b> {referrals}
@@ -800,23 +1224,128 @@ async def handle_reply_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == "ℹ️ Help":
         await show_help(update, context)
     
-    elif text == "🎁 3-Hourly Bonus":
+    elif text == "🎁 Hourly Bonus":
         await claim_hourly_bonus(update, context)
 
     elif text == "💸ገንዘብ አሰራር":
         await show_earning_guide(update, context)
 
-    elif text == "🏆 Leaderboard":  # Added Leaderboard handler
+    elif text == "🏆 Leaderboard":
         await show_leaderboard(update, context)
     
     elif text == "📢 Advertise":
         await start_advertisement(update, context)
     
     elif text == "➕ Join Channel":
-        await show_joinable_channels(update, context)  # Updated to use new function
+        await show_joinable_channels(update, context)
+    
+    elif text == "🎰 Lottery":  # New lottery handler
+        await show_lottery_menu(update, context)
+    
+    elif text in ["የ3 ብር lottery", "የ5 ብር lottery", "የ10 ብር lottery"]:
+    # Extract lottery type from the text
+        if "3" in text:
+            lottery_type = "3"
+        elif "5" in text:
+            lottery_type = "5"
+        elif "10" in text:
+            lottery_type = "10"
+        else:
+            await show_lottery_menu(update, context)
+            return
+
+        await show_lottery_confirmation_with_reply_buttons(update, context, lottery_type)
+        return  # Add this return statement to prevent falling through
     
     else:
         await show_main_menu(update, context)
+
+async def handle_lottery_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE, lottery_type: str):
+    """Handle lottery purchase with reply buttons"""
+    user_id = update.effective_user.id
+    lottery_config = LOTTERY_CONFIG[lottery_type]
+    
+    # Check user balance
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    
+    if not result:
+        await update.message.reply_text("❌ User not found.")
+        conn.close()
+        return
+    
+    balance = result[0]
+    
+    if balance < lottery_config['price']:
+        await update.message.reply_text(
+            f"❌ በቂ ገንዘብ የሎትም!\n\n"
+            f"ያሎት ገንዘብ: {balance} ብር\n"
+            f"የሎተሪ ዋጋ: {lottery_config['price']} ብር\n\n"
+            f"እባክዎ በመጀመሪያ ገንዘብ ያስገቡ"
+        )
+        conn.close()
+        return
+    
+    # Get current round
+    round_data = get_current_lottery_round(lottery_type)
+    if not round_data:
+        await update.message.reply_text("❌ ሎተሪ አልተገኘም። እባክዎ ቆይተው ይሞክሩ")
+        conn.close()
+        return
+    
+    # Check if user already bought a ticket in this round
+    cursor.execute('SELECT tickets_count FROM lottery_tickets WHERE round_id = ? AND user_id = ?', 
+                  (round_data['id'], user_id))
+    existing_ticket = cursor.fetchone()
+    
+    tickets_count = 1
+    if existing_ticket:
+        tickets_count = existing_ticket[0] + 1
+    
+    # Deduct balance and add/update ticket
+    cursor.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', 
+                  (lottery_config['price'], user_id))
+    
+    if existing_ticket:
+        cursor.execute('UPDATE lottery_tickets SET tickets_count = ? WHERE round_id = ? AND user_id = ?',
+                      (tickets_count, round_data['id'], user_id))
+    else:
+        cursor.execute('INSERT INTO lottery_tickets (round_id, user_id, tickets_count) VALUES (?, ?, ?)',
+                      (round_data['id'], user_id, tickets_count))
+    
+    conn.commit()
+    
+    # Get updated stats
+    stats = get_lottery_stats(lottery_type, round_data['id'])
+    
+    conn.close()
+    
+    # Clear the stored lottery type
+    context.user_data.pop('selected_lottery_type', None)
+    
+    # Show success message
+    remaining = lottery_config['required_participants'] - stats['tickets_sold']
+    remaining = max(0, remaining)
+    
+    await update.message.reply_text(
+        f"🎫 <b>የሎተሪ ትኬት ተግዝቷል!</b>\n\n"
+        f"💰 <b>የሎተሪ አይነት:</b> {lottery_type} ብር\n"
+        f"🎯 <b>ዋጋ:</b> {lottery_config['prize']} ብር\n"
+        f"📊 <b>የተገዙ ትኬቶች:</b> {tickets_count}\n"
+        f"👥 <b>አጠቃላይ ተሳታፊዎች:</b> {stats['participants']}\n"
+        f"🎟️ <b>አጠቃላይ ትኬቶች:</b> {stats['tickets_sold']}\n"
+        f"🎯 <b>የሚያሸንፉት:</b> {lottery_config['required_participants']} ሰው ሲያስገቡ\n"
+        f"⏳ <b>የቀሩ ትኬቶች:</b> {remaining}\n\n"
+        f"<i>ብዙ ትኬቶች በመግዛት የማሸነፍ እድልዎ ይጨምራል!</i>",
+        parse_mode="HTML"
+    )
+    
+    # Check if we reached required participants
+    if stats['tickets_sold'] >= lottery_config['required_participants']:
+        await draw_lottery_winner(context, lottery_type, round_data)
+    
 
 async def check_membership_decorator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check channel membership before proceeding with any command"""
@@ -843,6 +1372,55 @@ async def show_earning_guide(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     
     await update.message.reply_text(guide_text)
+
+
+async def show_lottery_confirmation_with_reply_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE, lottery_type: str):
+    """Show lottery confirmation with REPLY buttons instead of inline buttons"""
+    lottery_config = LOTTERY_CONFIG[lottery_type]
+    round_data = get_current_lottery_round(lottery_type)
+    stats = get_lottery_stats(lottery_type)
+    
+    if not round_data:
+        await update.message.reply_text("❌ ሎተሪ አልተገኘም። እባክዎ ቆይተው ይሞክሩ")
+        return
+    
+    # Check user balance
+    user_id = update.effective_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    balance = result[0] if result else 0
+    conn.close()
+    
+    remaining = lottery_config['required_participants'] - stats['tickets_sold']
+    remaining = max(0, remaining)
+    
+    # Store lottery type in context for confirmation
+    context.user_data['selected_lottery_type'] = lottery_type
+    
+    # Use REPLY buttons instead of inline buttons
+    keyboard = [
+        ["✅ ሎተሪ ይግዙ", "❌ ይቅር"],
+        ["📊 Main Menu"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    text = (
+        f"🎫 <b>የሎተሪ ማረጋገጫ</b>\n\n"
+        f"💰 <b>የሎተሪ አይነት:</b> {lottery_type} ብር\n"
+        f"🔢 <b ዙር:</b> {round_data['round_number']}\n"
+        f"💵 <b>የትኬት ዋጋ:</b> {lottery_config['price']} ብር\n"
+        f"🎁 <b>ሽልማት:</b> {lottery_config['prize']} ብር\n\n"
+        f"📊 <b>የዛሬው ሁኔታ:</b>\n"
+        f"• 👥 ተሳታፊዎች: {stats['participants']}\n"
+        f"• 🎟️ የተገዙ ትኬቶች: {stats['tickets_sold']}\n"
+        f"• ⏳ የቀሩ ትኬቶች: {remaining}\n\n"
+        f"💰 <b>ያሎት ገንዘብ:</b> {balance} ብር\n\n"
+        f"<i>ብዙ ትኬቶች በመግዛት የማሸነፍ እድልዎ ይጨምራል!</i>"
+    )
+    
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 # Balance and withdrawal system functions
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -960,7 +1538,7 @@ async def handle_phone_number_sharing(update: Update, context: ContextTypes.DEFA
     else:
         # User clicked the button but didn't share contact
         await update.message.reply_text(
-            "እባክዎን 'Share Phone Number' የሚለውን በመጫን ስልክቁጥሮን ያጋሩን። በዚህ ስልክ ቁጥር ነው ክፍያዎን የምናስተላልፍሎት."
+            "እባክዎን 'Share Phone Number' የሚለውን በመጫን �ስልክቁጥሮን ያጋሩን። በዚህ ስልክ ቁጥር ነው ክፍያዎን የምናስተላልፍሎት."
         )
 
 async def show_balance_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1942,6 +2520,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data.startswith("admin_approve_ad_") or query.data.startswith("admin_reject_ad_"):
         await handle_admin_ad_approval(update, context)
+
+    elif query.data == "lottery_stats":
+        await lottery_stats(update, context)
+    
+    elif query.data.startswith("lottery_stats_"):
+        lottery_type = query.data.replace("lottery_stats_", "")
+        await show_lottery_stats(update, context, lottery_type)
     
     else:
         # Default case for any unhandled callback
@@ -1963,7 +2548,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # First, check if it's one of the main menu buttons
     # Update this line in handle_text_messages function:
-    main_menu_buttons = ["📤 Share Referral Link", "💰 My Balance", "📢 Advertise", "➕ Join Channel", "🏆 Leaderboard", "ℹ️ Help","💸ገንዘብ አሰራር" , "🎁 Hourly Bonus"]
+    main_menu_buttons = ["📤 Share Referral Link", "💰 My Balance", "📢 Advertise", "➕ Join Channel", "🏆 Leaderboard", "ℹ️ Help","💸ገንዘብ አሰራር" , "🎁 Hourly Bonus", "🎰 Lottery"]
     
     if text in main_menu_buttons:
         # Clear any ongoing flows
@@ -1973,11 +2558,53 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle the main menu button
         await handle_reply_buttons(update, context)
         return
-        
+    
+    elif text in ["የ3 ብር lottery", "የ5 ብር lottery", "የ10 ብር lottery"]:
+    # Extract lottery type from the text
+        if "3" in text:
+            lottery_type = "3"
+        elif "5" in text:
+            lottery_type = "5"
+        elif "10" in text:
+            lottery_type = "10"
+        else:
+            await show_lottery_menu(update, context)
+            return
+
+        await show_lottery_confirmation_with_reply_buttons(update, context, lottery_type)
+        return
+            
     # Handle cancellation first
     if text == "❌ Cancel":
         context.user_data.clear()
         await show_main_menu(update, context)
+        return
+    
+    if text == "✅ ሎተሪ ይግዙ":
+        lottery_type = context.user_data.get('selected_lottery_type')
+        if lottery_type:
+            await handle_lottery_purchase(update, context, lottery_type)
+        else:
+            await update.message.reply_text("❌ የሎተሪ አይነት አልተገኘም። እባክዎ እንደገና ይሞክሩ")
+        return
+        
+    elif text == "❌ ይቅር":
+        await show_lottery_menu(update, context)
+        return
+    
+    elif text in ["የ3 ብር lottery", "የ5 ብር lottery", "የ10 ብር lottery"]:
+        # Extract lottery type from the text
+        if "3" in text:
+            lottery_type = "3"
+        elif "5" in text:
+            lottery_type = "5"
+        elif "10" in text:
+            lottery_type = "10"
+        else:
+            await show_lottery_menu(update, context)
+            return
+    
+        await show_lottery_confirmation_with_reply_buttons(update, context, lottery_type)
         return
         
     # Handle balance options
@@ -2130,7 +2757,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 1. <b>የመጋበዣ link በማጋራት</b>: የራሶት ልዩ የሆነውን የመጋበዛ ሊንክ ለሰዎች ሲያጋሩ በእያንዳንዱ ሰው {REFERRAL_REWARD} ብር ያገኛሉ ። ብዙ ባጋሩ ቁጥር ብዙ ገንዘብ ያገኛሉ
 2. <b>ቻናሎችን በመቀላቀል</b>: ቻናሎችን በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ከአንድ ቻናል ያገኛሉ 
 3. <b>Advertise</b>:እዚህ ቦት ላይ ቻናሎትን ማስተዋወቅ ይችላሉ
-4. <b>የሰዓት ሽልማት</b>: በየ 3 ሰአት {HOURLY_BONUS_AMOUNT} ብር ያግኙ
+4. <b>የሰዓት ሽልማት</b>: በየሰዓቱ {HOURLY_BONUS_AMOUNT} ብር ያግኙ
+5. <b>Lottery</b>: በሎተሪ በመሳተፍ ትልልቅ ሽልማቶችን ያሸንፉ
         
        እርዳታ ይፈልጋሉ? 👉 {ADMIN_USERNAME}
        ቻናላችንን ይቀላቀሉ 👉 @AdeyChannel
@@ -2178,7 +2806,6 @@ async def channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_text += f"• Total Joins: {total_joins}\n"
     stats_text += f"• Rewards Given: {rewards_given}\n"
     stats_text += f"• Total Rewards: {total_rewards} birr\n\n"
-
     stats_text += f"<b>Channels:</b>\n"
     for channel in channels:
         ad_id, username, desired, current, cost, is_active, advertiser, created = channel
@@ -3856,6 +4483,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/add_required_channel &lt;@username&gt; &lt;name&gt;</code> – Add required channel.\n"
         "<code>/remove_required_channel &lt;@username&gt;</code> – Remove required channel.\n"
         "<code>/list_required_channels</code> – List all required channels.\n\n"
+         "🎰 <b>Lottery Management</b>\n"  # Added lottery section
+        "<code>/lottery_stats</code> – View lottery statistics and winners\n\n"
          "⚙️ <b>Bot Settings</b>\n"
         "<code>/settings</code> – View current bot settings.\n"
         "<code>/set_min_withdrawal &lt;amount&gt;</code> – Set minimum withdrawal amount.\n"
@@ -3906,6 +4535,7 @@ def main():
     application.add_handler(CommandHandler("add_required_channel", add_required_channel))
     application.add_handler(CommandHandler("remove_required_channel", remove_required_channel))
     application.add_handler(CommandHandler("list_required_channels", list_required_channels))
+    application.add_handler(CommandHandler("lottery_stats", lottery_stats_command))  # New lottery stats command
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.CONTACT, handle_phone_number_sharing))
     application.add_handler(MessageHandler(filters.PHOTO, handle_admin_screenshot))  # New handler for admin screenshots
