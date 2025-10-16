@@ -14,6 +14,9 @@ import asyncio  # Add this line with other imports
 BOT_TOKEN = "8231581554:AAEPqYBPzwq31mI-GzxuJb-CgpyBRIFZPuE"  # Replace with actual token
 ADMIN_ID = 5397131005  # Replace with your user ID
 
+HOURLY_BONUS_AMOUNT = 0.999  # 0.999 birr per 3 hours
+HOURLY_BONUS_COOLDOWN = 10800  # 3 hours in seconds (3 * 60 * 60 = 10800)s
+
 # New configuration variables
 MIN_WITHDRAWAL = 20  # Minimum withdrawal amount
 ADMIN_USERNAME = "@Adey_support"  # Replace with actual admin username
@@ -61,6 +64,15 @@ def init_db():
             value REAL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS hourly_bonus (
+        user_id INTEGER PRIMARY KEY,
+        last_claim TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        total_claimed INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
     ''')
     
     cursor.execute('''
@@ -298,17 +310,23 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
     
+    cooldown_hours = HOURLY_BONUS_COOLDOWN / 3600
+    
     text = (
         "⚙️ <b>Current Bot Settings</b>\n\n"
         f"💰 <b>Minimum Withdrawal:</b> {MIN_WITHDRAWAL} ብር\n"
         f"📢 <b>Cost Per Subscriber:</b> {COST_PER_SUBSCRIBER} ብር\n"
         f"🎯 <b>Channel Join Reward:</b> {JOIN_CHANNEL_REWARD} ብር\n"
-        f"👥 <b>Referral Reward:</b> {REFERRAL_REWARD} ብር\n\n"
+        f"👥 <b>Referral Reward:</b> {REFERRAL_REWARD} ብር\n"
+        f"🎁 <b>Hourly Bonus:</b> {HOURLY_BONUS_AMOUNT} ብር\n"
+        f"⏰ <b>Bonus Cooldown:</b> {cooldown_hours} hours\n\n"
         "<b>Commands to change:</b>\n"
         "<code>/set_min_withdrawal &lt;amount&gt;</code>\n"
         "<code>/set_cost_per_subscriber &lt;amount&gt;</code>\n"
         "<code>/set_join_reward &lt;amount&gt;</code>\n"
-        "<code>/set_referral_reward &lt;amount&gt;</code>\n\n"
+        "<code>/set_referral_reward &lt;amount&gt;</code>\n"
+        "<code>/set_hourly_bonus &lt;amount&gt;</code>\n"
+        "<code>/set_bonus_cooldown &lt;hours&gt;</code>\n\n"
         "<i>Note: Changes will reset when bot restarts</i>"
     )
     
@@ -699,9 +717,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Updated reply keyboard with new buttons
         keyboard = [
-            ["➕ Join Channel", "👥 My Referrals"],
-            ["💰 My Balance","🏆 Leaderboard","📢 Advertise"],
-            ["ℹ️ Help","📤 Share Referral Link"],
+            ["➕ Join Channel","🎁 3-3-Hourly Bonus"],
+            ["💰 My Balance","🏆 Leaderboard"],
+            ["ℹ️ Help","📤 Share Referral Link","📢 Advertise"],
             ["💸ገንዘብ አሰራር"]  # Added Leaderboard button
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -740,10 +758,10 @@ async def show_main_menu_from_callback(update: Update, context: ContextTypes.DEF
         
         # Updated reply keyboard with new buttons
         keyboard = [
-            ["➕ Join Channel", "👥 My Referrals"],
-            ["💰 My Balance","🏆 Leaderboard","📢 Advertise"],
-            ["ℹ️ Help","📤 Share Referral Link"],
-            ["💸ገንዘብ አሰራር"]
+            ["➕ Join Channel","🎁 3-Hourly Bonus" ],
+            ["💰 My Balance","🏆 Leaderboard"],
+            ["ℹ️ Help","📤 Share Referral Link","📢 Advertise"],
+            ["💸ገንዘብ አሰራር"]  # Added Leaderboard button
         ]
         
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -779,11 +797,11 @@ async def handle_reply_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == "💰 My Balance":
         await show_balance(update, context)
     
-    elif text == "👥 My Referrals":
-        await show_referrals(update, context)
-    
     elif text == "ℹ️ Help":
         await show_help(update, context)
+    
+    elif text == "🎁 3-Hourly Bonus":
+        await claim_hourly_bonus(update, context)
 
     elif text == "💸ገንዘብ አሰራር":
         await show_earning_guide(update, context)
@@ -966,6 +984,119 @@ async def show_balance_options(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=reply_markup,
         parse_mode="HTML"
     )
+
+async def claim_hourly_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle hourly bonus claims"""
+    if not await check_membership_decorator(update, context):
+        return
+    
+    user_id = update.effective_user.id
+    current_time = datetime.now()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Get user's last claim time
+    cursor.execute('SELECT last_claim, total_claimed FROM hourly_bonus WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    
+    if result:
+        last_claim_str, total_claimed = result
+        last_claim = datetime.fromisoformat(last_claim_str)
+        time_diff = (current_time - last_claim).total_seconds()
+        
+        if time_diff < HOURLY_BONUS_COOLDOWN:
+            # Calculate remaining time
+            remaining_seconds = HOURLY_BONUS_COOLDOWN - time_diff
+            hours = int(remaining_seconds // 3600)
+            minutes = int((remaining_seconds % 3600) // 60)
+            seconds = int(remaining_seconds % 60)
+            
+            if hours > 0:
+                time_left = f"{hours} ሰአት {minutes} ደቂቃ"
+            elif minutes > 0:
+                time_left = f"{minutes} ደቂቃ {seconds} ሰከንድ"
+            else:
+                time_left = f"{seconds} ሰከንድ"
+            
+            await update.message.reply_text(
+                f"⏰ <b>ሽልማቱን ለማግኘት ሰአቱ አልደረሰም !</b>\n\n"
+                f"ሽልማት ለማግኘት የሚቀረው ጊዜ: {time_left}\n\n"
+                f"እባክዎ ትንሽ ጊዜ ይጠብቁ",
+                parse_mode="HTML"
+            )
+            conn.close()
+            return
+    
+    # User can claim bonus
+    cursor.execute('''
+        INSERT OR REPLACE INTO hourly_bonus (user_id, last_claim, total_claimed)
+        VALUES (?, ?, COALESCE((SELECT total_claimed FROM hourly_bonus WHERE user_id = ?), 0) + 1)
+    ''', (user_id, current_time, user_id))
+    
+    # Add bonus to user balance
+    cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (HOURLY_BONUS_AMOUNT, user_id))
+    
+    # Get updated balance
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    new_balance = cursor.fetchone()[0]
+    
+    # Get total claimed count
+    cursor.execute('SELECT total_claimed FROM hourly_bonus WHERE user_id = ?', (user_id,))
+    total_claimed = cursor.fetchone()[0]
+    
+    conn.commit()
+    conn.close()
+    
+    await update.message.reply_text(
+        f"🎉<b> {HOURLY_BONUS_AMOUNT} ብር በAedy Bonus አግኝተዋል!</b>\n\n",
+        parse_mode="HTML"
+    )
+
+async def set_hourly_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set hourly bonus amount"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /set_hourly_bonus <amount>\n\n"
+            "Example: <code>/set_hourly_bonus 0.5</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        global HOURLY_BONUS_AMOUNT
+        HOURLY_BONUS_AMOUNT = float(context.args[0])
+        await update.message.reply_text(f"✅ Hourly bonus amount set to {HOURLY_BONUS_AMOUNT} ብር")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
+
+async def set_bonus_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set bonus cooldown in hours"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /set_bonus_cooldown <hours>\n\n"
+            "Example: <code>/set_bonus_cooldown 2</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        hours = float(context.args[0])
+        global HOURLY_BONUS_COOLDOWN
+        HOURLY_BONUS_COOLDOWN = hours * 3600  # Convert to seconds
+        await update.message.reply_text(f"✅ Bonus cooldown set to {hours} hours")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid number.")
 
 async def show_balance_options_from_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1415,6 +1546,10 @@ async def clear_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Handle admin sending screenshot
 async def handle_admin_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if update has a user context
+    if not update.effective_user:
+        return
+    
     if update.effective_user.id != ADMIN_ID:
         return
     
@@ -1527,12 +1662,15 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id, username, first_name, last_name, phone_number, balance, total_referrals, referral_code, joined_at = user
 
+    # Referral statistics
     cursor.execute("SELECT COUNT(*), COALESCE(SUM(earned_amount), 0) FROM referrals WHERE referrer_id = ?", (user_id,))
     referral_count, total_earned = cursor.fetchone()
 
+    # Advertisement statistics
     cursor.execute("SELECT COUNT(*), COALESCE(SUM(cost), 0) FROM advertisements WHERE advertiser_id = ?", (user_id,))
     ad_count, total_spent = cursor.fetchone()
 
+    # Withdrawal statistics
     cursor.execute("""
         SELECT status, COUNT(*), COALESCE(SUM(amount), 0)
         FROM withdrawal_requests 
@@ -1545,23 +1683,55 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ) or "None"
 
     total_withdrawn = sum(total for status, _, total in withdrawal_stats if status == "completed")
+
+    # Hourly bonus statistics
+    cursor.execute('SELECT total_claimed, last_claim FROM hourly_bonus WHERE user_id = ?', (user_id,))
+    bonus_data = cursor.fetchone()
+
+    if bonus_data:
+        bonus_claims, last_claim = bonus_data
+        bonus_earned = bonus_claims * HOURLY_BONUS_AMOUNT
+        bonus_info = f"• Hourly Bonus Claims: {bonus_claims}\n"
+        bonus_info += f"• Hourly Bonus Earned: {bonus_earned:.2f} birr\n"
+        bonus_info += f"• Last Bonus Claim: {last_claim[:16] if last_claim else 'Never'}\n"
+    else:
+        bonus_info = "• Hourly Bonus: Never claimed\n"
+
+    # Channel join statistics
+    cursor.execute('SELECT COUNT(*) FROM channel_joins WHERE user_id = ?', (user_id,))
+    channel_joins = cursor.fetchone()[0]
+    channel_earned = channel_joins * JOIN_CHANNEL_REWARD
+
     conn.close()
 
     text = (
         f"📊 <b>User Statistics</b>\n\n"
-        f"👤 <b>Name:</b> {first_name or ''} {last_name or ''}\n"
-        f"🔗 <b>Username:</b> @{username if username else 'N/A'}\n"
-        f"🆔 <b>User ID:</b> {user_id}\n"
-        f"📱 <b>Phone:</b> {phone_number or 'Not set'}\n"
-        f"🪪 <b>Referral Code:</b> <code>{referral_code}</code>\n"
-        f"📅 <b>Joined:</b> {joined_at}\n\n"
-        f"💰 <b>Balance:</b> {balance:.2f} birr\n"
-        f"👥 <b>Referrals:</b> {total_referrals} (actual: {referral_count})\n"
-        f"💵 <b>Total Earned from Referrals:</b> {total_earned:.2f} birr\n"
-        f"📢 <b>Advertisements:</b> {ad_count}\n"
-        f"💸 <b>Total Spent on Ads:</b> {total_spent:.2f} birr\n\n"
-        f"💳 <b>Withdrawal Requests:</b>\n{withdrawal_summary}\n\n"
-        f"✅ <b>Total Withdrawn:</b> {total_withdrawn:.2f} birr"
+        f"👤 <b>User Information</b>\n"
+        f"• Name: {first_name or ''} {last_name or ''}\n"
+        f"• Username: @{username if username else 'N/A'}\n"
+        f"• User ID: {user_id}\n"
+        f"• Phone: {phone_number or 'Not set'}\n"
+        f"• Referral Code: <code>{referral_code}</code>\n"
+        f"• Joined: {joined_at}\n\n"
+        
+        f"💰 <b>Financial Summary</b>\n"
+        f"• Current Balance: {balance:.2f} birr\n"
+        f"• Total Earned from Referrals: {total_earned:.2f} birr\n"
+        f"• Total Spent on Ads: {total_spent:.2f} birr\n"
+        f"• Total Withdrawn: {total_withdrawn:.2f} birr\n\n"
+        
+        f"🎁 <b>Bonus & Rewards</b>\n"
+        f"{bonus_info}"
+        f"• Channel Joins: {channel_joins} ({channel_earned:.2f} birr earned)\n\n"
+        
+        f"👥 <b>Referral Activity</b>\n"
+        f"• Referrals in System: {referral_count}\n"
+        f"• Total Referrals (shown to user): {total_referrals}\n\n"
+        
+        f"📢 <b>Advertising</b>\n"
+        f"• Advertisements Created: {ad_count}\n\n"
+        
+        f"💳 <b>Withdrawal Requests</b>\n{withdrawal_summary}"
     )
 
     await update.message.reply_text(text, parse_mode="HTML")
@@ -1738,7 +1908,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check membership for main menu actions (skip for channel joining flows)
     if (user_id != ADMIN_ID and 
         not query.data.startswith("verify_join_") and 
-        not query.data.startswith("join_channel_") and
         query.data != "check_membership"):
         
         if not await check_membership_decorator(update, context):
@@ -1746,30 +1915,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "check_membership":
         await check_membership(update, context)
-    elif query.data.startswith("join_channel_"):
-        await handle_join_channel(update, context)
-    elif query.data in ["confirm_broadcast", "cancel_broadcast"]:
-        await handle_broadcast_confirmation(update, context)
+    
     elif query.data.startswith("verify_join_"):
         await verify_channel_join(update, context)
+    
     elif query.data == "main_menu":
         await show_main_menu_from_callback(update, context)
-    elif query.data == "cancel_join_channels" or query.data == "cancel_join":
-        await cancel_join_channels(update, context)
-    elif query.data == "show_next_channel":  # ADD THIS LINE
-        await show_next_channel(update, context)
-    elif query.data == "refresh_leaderboard":  # Added leaderboard refresh handler
-        await refresh_leaderboard(update, context)
+    
+    elif query.data in ["confirm_broadcast", "cancel_broadcast"]:
+        await handle_broadcast_confirmation(update, context)
+    
     elif query.data in ["confirm_ad", "cancel_ad"]:
         await handle_advertisement_confirmation(update, context)
+    
     elif query.data.startswith("confirm_withdraw_") or query.data == "cancel_withdraw":
         await handle_withdrawal_confirmation(update, context)
+    
     elif query.data.startswith("admin_confirm_withdraw_") or query.data.startswith("admin_cancel_withdraw_"):
         await handle_admin_withdrawal_action(update, context)
+    
     elif query.data.startswith("admin_send_screenshot_") or query.data.startswith("admin_decline_screenshot_"):
         await handle_admin_screenshot_action(update, context)
+    
     elif query.data.startswith("confirm_send_screenshot_") or query.data.startswith("cancel_send_screenshot_"):
         await handle_screenshot_confirmation(update, context)
+    
+    elif query.data.startswith("admin_approve_ad_") or query.data.startswith("admin_reject_ad_"):
+        await handle_admin_ad_approval(update, context)
+    
+    else:
+        # Default case for any unhandled callback
+        await query.edit_message_text("❌ Unknown action. Please try again.")
+        await show_main_menu_from_callback(update, context)
 
 # Handle text messages for all flows - FIXED VERSION
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1786,7 +1963,7 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # First, check if it's one of the main menu buttons
     # Update this line in handle_text_messages function:
-    main_menu_buttons = ["📤 Share Referral Link", "💰 My Balance", "👥 My Referrals", "📢 Advertise", "➕ Join Channel", "🏆 Leaderboard", "ℹ️ Help","💸ገንዘብ አሰራር"]
+    main_menu_buttons = ["📤 Share Referral Link", "💰 My Balance", "📢 Advertise", "➕ Join Channel", "🏆 Leaderboard", "ℹ️ Help","💸ገንዘብ አሰራር" , "🎁 Hourly Bonus"]
     
     if text in main_menu_buttons:
         # Clear any ongoing flows
@@ -1953,6 +2130,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 1. <b>የመጋበዣ link በማጋራት</b>: የራሶት ልዩ የሆነውን የመጋበዛ ሊንክ ለሰዎች ሲያጋሩ በእያንዳንዱ ሰው {REFERRAL_REWARD} ብር ያገኛሉ ። ብዙ ባጋሩ ቁጥር ብዙ ገንዘብ ያገኛሉ
 2. <b>ቻናሎችን በመቀላቀል</b>: ቻናሎችን በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ከአንድ ቻናል ያገኛሉ 
 3. <b>Advertise</b>:እዚህ ቦት ላይ ቻናሎትን ማስተዋወቅ ይችላሉ
+4. <b>የሰዓት ሽልማት</b>: በየ 3 ሰአት {HOURLY_BONUS_AMOUNT} ብር ያግኙ
         
        እርዳታ ይፈልጋሉ? 👉 {ADMIN_USERNAME}
        ቻናላችንን ይቀላቀሉ 👉 @AdeyChannel
@@ -2049,11 +2227,11 @@ async def handle_desired_subscribers(update: Update, context: ContextTypes.DEFAU
 
 
 def get_next_available_channel(user_id):
-    """Get the next available channel that the user hasn't joined yet"""
+    """Get ALL available channels that the user hasn't joined yet"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Get active advertisements that are channels and haven't reached their goal
+    # Get ALL active advertisements that are channels and haven't reached their goal
     # AND that the user hasn't joined yet
     cursor.execute('''
         SELECT a.id, a.channel_username, a.channel_link, a.desired_subscribers, a.current_subscribers 
@@ -2066,13 +2244,13 @@ def get_next_available_channel(user_id):
               FROM channel_joins 
               WHERE user_id = ?
           )
-        LIMIT 1
+        ORDER BY a.created_at DESC
     ''', (user_id,))
     
-    channel = cursor.fetchone()
+    channels = cursor.fetchall()
     conn.close()
     
-    return channel
+    return channels
 
 
 async def show_joinable_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2081,13 +2259,13 @@ async def show_joinable_channels(update: Update, context: ContextTypes.DEFAULT_T
 
     user_id = update.effective_user.id
 
-    # Get the correct message object (works for both message + callback_query)
+    # Get the message object
     message = update.message or (update.callback_query and update.callback_query.message)
 
-    # Get the next available channel that user hasn't joined
-    channel = get_next_available_channel(user_id)
+    # Get ONE available channel (the first one)
+    channels = get_next_available_channel(user_id)
 
-    if not channel:
+    if not channels:
         if message:
             await message.reply_text(
                 "<b>⛔️አሁን ላይ ምንም ስራ የለም።</b>\n\n"
@@ -2096,130 +2274,111 @@ async def show_joinable_channels(update: Update, context: ContextTypes.DEFAULT_T
             )
         return
 
+    # Show only the first available channel
+    channel = channels[0]
     ad_id, username, link, desired, current = channel
+
+    keyboard = [
+        [InlineKeyboardButton(f"📢 Join @{username}", url=link)],
+        [InlineKeyboardButton("✅ I've Joined", callback_data=f"verify_join_{ad_id}")],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            f"📢 <b>ቻናል በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ያግኙ !</b>\n\n"
+            f"1.Join @{username}' በማለት ቻናሉን ይቀላቀሉ\n"
+            f"2.ከተቀላቀሉ በኋላ 'I've Joined' የሚለውን በመንካት ገንዘቦን ያግኙ!\n\n",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    else:
+        await message.reply_text(
+            f"📢 <b>ቻናል በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ያግኙ !</b>\n\n"
+            f"1.'Join @{username}' በማለት ቻናሉን ይቀላቀሉ\n"
+            f"2.ከተቀላቀሉ በኋላ 'I've Joined' የሚለውን በመንካት ገንዘቦን ያግኙ!\n\n",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+
+async def show_single_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, channels, index):
+    """Show a single channel with navigation"""
+    if index >= len(channels):
+        await show_no_more_channels(update, context)
+        return
+
+    channel = channels[index]
+    ad_id, username, link, desired, current = channel
+
+    # Store current index in context for navigation
+    context.user_data['current_channel_index'] = index
+    context.user_data['available_channels'] = channels
 
     keyboard = [
         [InlineKeyboardButton(f"📢 Join @{username}", url=link)],
         [InlineKeyboardButton("✅ I've Joined", callback_data=f"verify_join_{ad_id}")]
     ]
 
+    # Add navigation buttons if there are multiple channels
+    if len(channels) > 1:
+        nav_buttons = []
+        if index > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_channel_{index}"))
+        if index < len(channels) - 1:
+            nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"next_channel_{index}"))
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if message:
+    message = update.message or (update.callback_query and update.callback_query.message)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            f"📢 <b>ቻናል በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ያግኙ !</b>\n\n"
+            f"1.'Join @{username}' በማለት ቻናሉን ይቀላቀሉ\n"
+            f"2.ከተቀላቀሉ በኋላ 'I've Joined' የሚለውን በመንካት ገንዘቦን ያግኙ!\n\n",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    else:
         await message.reply_text(
             f"📢 <b>ቻናል በመቀላቀል {CHANNEL_JOIN_REWARD} ብር ያግኙ !</b>\n\n"
-            f"<b>Channel:</b> @{username}\n"
-            f"<b>Reward:</b> {CHANNEL_JOIN_REWARD} ብር\n\n",
+            f"1.'Join @{username}' በማለት ቻናሉን ይቀላቀሉ\n"
+            f"2.ከተቀላቀሉ በኋላ 'I've Joined' የሚለውን በመንካት ገንዘቦን ያግኙ!\n\n",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+
+async def show_no_more_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show message when no more channels are available"""
+    message = update.message or (update.callback_query and update.callback_query.message)
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "🎉 <b>You've joined all available channels!</b>\n\n"
+            "There are no more channels available to join at the moment.\n"
+            "Check back later for new campaigns!",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    else:
+        await message.reply_text(
+            "🎉 <b>You've joined all available channels!</b>\n\n"
+            "There are no more channels available to join at the moment.\n"
+            "Check back later for new campaigns!",
             reply_markup=reply_markup,
             parse_mode="HTML"
         )
 
 
-async def show_next_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    # Get the next available channel
-    channel = get_next_available_channel(user_id)
-    
-    if not channel:
-        await query.edit_message_text(
-            "🎉 <b>You've joined all available channels!</b>\n\n"
-            "There are no more channels available to join at the moment.\n"
-            "Check back later for new campaigns!",
-            parse_mode="HTML"
-        )
-        return
-    
-    ad_id, username, link, desired, current = channel
-    
-    # Create inline keyboard for this single channel
-    keyboard = [
-        [InlineKeyboardButton(f"📢 Join @{username}", callback_data=f"join_channel_{ad_id}")],
-        [InlineKeyboardButton("➡️ Next Channel", callback_data="show_next_channel")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        f"📢 <b>Join Channel & Earn {CHANNEL_JOIN_REWARD} birr!</b>\n\n"
-        f"<b>Channel:</b> @{username}\n"
-        f"<b>Progress:</b> {current}/{desired} subscribers\n"
-        f"<b>Reward:</b> {CHANNEL_JOIN_REWARD} birr\n\n"
-        f"Click the button below to join this channel and earn {CHANNEL_JOIN_REWARD} birr!",
-        reply_markup=reply_markup,
-        parse_mode="HTML"
-    )
-
 # Add this function to handle channel joining
-async def handle_join_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    ad_id = int(query.data.replace("join_channel_", ""))
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get channel details
-    cursor.execute('''
-        SELECT channel_username, channel_link, desired_subscribers, current_subscribers 
-        FROM advertisements 
-        WHERE id = ?
-    ''', (ad_id,))
-    channel = cursor.fetchone()
-    
-    if not channel:
-        await query.edit_message_text("❌ Channel not found or no longer available.")
-        conn.close()
-        return
-    
-    username, link, desired, current = channel
-    
-    # Check if user has already joined this channel
-    cursor.execute('''
-        SELECT * FROM channel_joins 
-        WHERE advertisement_id = ? AND user_id = ?
-    ''', (ad_id, query.from_user.id))
-    
-    already_joined = cursor.fetchone()
-    
-    if already_joined:
-        await query.edit_message_text(
-            f"✅ <b>You've already joined this channel!</b>\n\n"
-            f"Channel: @{username}\n"
-            f"Reward: {CHANNEL_JOIN_REWARD} birr (already claimed)\n\n"
-            f"You can check other available channels.",
-            parse_mode="HTML"
-        )
-        conn.close()
-        return
-    
-    # Create join verification keyboard
-    keyboard = [
-        [InlineKeyboardButton(f"📢 Join @{username}", url=link)],
-        [InlineKeyboardButton("✅ I've Joined", callback_data=f"verify_join_{ad_id}")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_join")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        f"📢 <b>መመርያ</b>\n\n"
-        f"<b>Channel:</b> @{username}\n"
-        f"<b>የሚገኘው የገንዘብ መጠን:</b> {CHANNEL_JOIN_REWARD} ብር\n\n"
-        f"<b>አካሄድ:</b>\n"
-        f"1. ከታች join @{username} የሚለውን ይጫኑ\n"
-        f"2. ቻናሉን join ያድርጉ\n"
-        f"3. ሲጨርሱ i've joined የሚለውን ይጫኑ\n\n",
-        reply_markup=reply_markup,
-        parse_mode="HTML"
-    )
-    
-    conn.close()
-
 # Add this function to verify channel joining
 # async def verify_channel_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     """Handle 'I've Joined' button press with simple message feedback"""
@@ -2352,74 +2511,76 @@ async def handle_join_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def verify_channel_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-    ad_id = int(query.data.replace("verify_join_", ""))
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    # Get channel info
-    cursor.execute("SELECT channel_username, channel_link FROM advertisements WHERE id = ?", (ad_id,))
-    ad = cursor.fetchone()
-    if not ad:
-        await query.edit_message_text("❌ Channel not found or no longer active.")
-        conn.close()
-        return
-
-    username, link = ad
-
-    # Check if user is actually a member
+    await query.answer()
+    
     try:
-        member = await context.bot.get_chat_member(f"@{username}", user_id)
-        if member.status in ["left", "kicked"]:
-            await query.answer("❌ You must join the channel first!", show_alert=True)
+        ad_id = int(query.data.replace("verify_join_", ""))
+        user_id = query.from_user.id
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Get channel info
+        cursor.execute("SELECT channel_username, channel_link FROM advertisements WHERE id = ?", (ad_id,))
+        ad = cursor.fetchone()
+        if not ad:
+            await query.edit_message_text("❌ Channel not found. It might have expired.")
             conn.close()
             return
-    except Exception:
-        await query.answer("⚠️ Could not verify channel join.", show_alert=True)
+
+        username, link = ad
+
+        # Check if user is actually a member
+        try:
+            member = await context.bot.get_chat_member(f"@{username}", user_id)
+            if member.status in ["left", "kicked"]:
+                await query.answer("❌ You must join the channel first!", show_alert=True)
+                conn.close()
+                return
+        except Exception as e:
+            logging.error(f"Error checking membership for @{username}: {e}")
+            await query.answer("⚠️ Could not verify channel join. Please make sure you've joined.", show_alert=True)
+            conn.close()
+            return
+
+        # Check if user was already rewarded
+        cursor.execute("SELECT id FROM channel_joins WHERE advertisement_id = ? AND user_id = ?", (ad_id, user_id))
+        if cursor.fetchone():
+            await query.answer("✅ Already rewarded for this channel.", show_alert=True)
+            conn.close()
+            return
+
+        # Insert join record and reward user
+        cursor.execute(
+            "INSERT INTO channel_joins (advertisement_id, user_id, reward_given) VALUES (?, ?, 1)",
+            (ad_id, user_id),
+        )
+        cursor.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+            (CHANNEL_JOIN_REWARD, user_id),
+        )
+        cursor.execute(
+            "UPDATE advertisements SET current_subscribers = current_subscribers + 1 WHERE id = ?",
+            (ad_id,),
+        )
+
+        conn.commit()
         conn.close()
-        return
 
-    # Insert join record if not already rewarded
-    cursor.execute("SELECT id FROM channel_joins WHERE advertisement_id = ? AND user_id = ?", (ad_id, user_id))
-    if cursor.fetchone():
-        await query.answer("✅ Already rewarded for this channel.", show_alert=True)
-        conn.close()
-        return
+        # Success message - NO inline buttons, just plain text
+        await query.edit_message_text(
+            f"🎉 <b>ቻናል በመቀላቀል {CHANNEL_JOIN_REWARD} ብር አግኝተዋል ። </b>\n\n",
+            parse_mode="HTML"
+        )
 
-    cursor.execute(
-        "INSERT INTO channel_joins (advertisement_id, user_id, reward_given) VALUES (?, ?, 1)",
-        (ad_id, user_id),
-    )
-    cursor.execute(
-        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-        (CHANNEL_JOIN_REWARD, user_id),
-    )
-    cursor.execute(
-        "UPDATE advertisements SET current_subscribers = current_subscribers + 1 WHERE id = ?",
-        (ad_id,),
-    )
-
-    conn.commit()
-    conn.close()
-
-    # Success message
-    await query.edit_message_text(
-        f"🎉 ስራውን በትክክል ሰርተዋል ፣ {CHANNEL_JOIN_REWARD} ብር ወደሂሳቦት ገብቷል።"
-    )
-
-    # Show next channel
-    await show_joinable_channels(update, context)
+    except ValueError:
+        await query.answer("❌ Invalid channel. Please try again.", show_alert=True)
+    except Exception as e:
+        logging.error(f"Error in verify_channel_join: {e}")
+        await query.answer("❌ An error occurred. Please try again.", show_alert=True)
 
 
 # Add this function to handle join cancellation
-async def cancel_join_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text("❌ Channel joining cancelled.")
-    await show_main_menu_from_callback(update, context)
-
 
 async def global_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Only admin can use this command
@@ -3523,11 +3684,158 @@ async def show_leaderboard_from_callback(update: Update, context: ContextTypes.D
         parse_mode="HTML"
     )
 
+async def bonus_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show hourly bonus statistics"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Total bonus statistics
+    cursor.execute('''
+        SELECT 
+            COUNT(*) as total_users_claimed,
+            SUM(total_claimed) as total_claims,
+            SUM(total_claimed) * ? as total_amount_distributed
+        FROM hourly_bonus
+    ''', (HOURLY_BONUS_AMOUNT,))
+    
+    total_stats = cursor.fetchone()
+    total_users, total_claims, total_amount = total_stats
+
+    # Top users by bonus claims
+    cursor.execute('''
+        SELECT u.user_id, u.username, u.first_name, hb.total_claimed, 
+               (hb.total_claimed * ?) as total_earned
+        FROM hourly_bonus hb
+        JOIN users u ON hb.user_id = u.user_id
+        ORDER BY hb.total_claimed DESC
+        LIMIT 10
+    ''', (HOURLY_BONUS_AMOUNT,))
+    
+    top_users = cursor.fetchall()
+
+    # Recent claims (last 24 hours)
+    cursor.execute('''
+        SELECT COUNT(*) as recent_claims
+        FROM hourly_bonus 
+        WHERE datetime(last_claim) > datetime('now', '-1 day')
+    ''')
+    
+    recent_claims = cursor.fetchone()[0]
+
+    conn.close()
+
+    text = (
+        "🎁 <b>Hourly Bonus Statistics</b>\n\n"
+        
+        "📊 <b>Overall Statistics</b>\n"
+        f"• Total Users Claimed: {total_users or 0}\n"
+        f"• Total Claims: {total_claims or 0}\n"
+        f"• Total Amount Distributed: {total_amount or 0:.2f} ብር\n"
+        f"• Recent Claims (24h): {recent_claims}\n"
+        f"• Current Bonus Amount: {HOURLY_BONUS_AMOUNT} ብር\n"
+        f"• Cooldown Period: {HOURLY_BONUS_COOLDOWN/3600} hours\n\n"
+    )
+
+    if top_users:
+        text += "🏆 <b>Top Users by Bonus Claims</b>\n"
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        
+        for i, (user_id, username, first_name, claims, earned) in enumerate(top_users):
+            medal = medals[i] if i < len(medals) else f"{i+1}."
+            name = f"@{username}" if username else (first_name or f"User {user_id}")
+            text += f"{medal} {name}: {claims} claims ({earned:.2f} ብር)\n"
+    
+    text += f"\n💡 <b>Quick Commands:</b>\n"
+    text += f"<code>/set_hourly_bonus {HOURLY_BONUS_AMOUNT + 0.1}</code>\n"
+    text += f"<code>/set_bonus_cooldown {HOURLY_BONUS_COOLDOWN/3600 + 1}</code>"
+
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def reset_bonus_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset a user's bonus cooldown"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /reset_bonus_cooldown <user_id OR @username>\n\n"
+            "Examples:\n"
+            "<code>/reset_bonus_cooldown 123456789</code>\n"
+            "<code>/reset_bonus_cooldown @username</code>\n\n"
+            "This will allow the user to claim the hourly bonus immediately.",
+            parse_mode="HTML"
+        )
+        return
+
+    user_identifier = context.args[0]
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Find user
+    if user_identifier.startswith('@'):
+        username = user_identifier[1:]
+        cursor.execute('SELECT user_id, username FROM users WHERE username = ?', (username,))
+    else:
+        try:
+            user_id = int(user_identifier)
+            cursor.execute('SELECT user_id, username FROM users WHERE user_id = ?', (user_id,))
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid user ID or @username.")
+            conn.close()
+            return
+
+    user = cursor.fetchone()
+
+    if not user:
+        await update.message.reply_text(f"❌ No user found with identifier: {user_identifier}")
+        conn.close()
+        return
+
+    user_id, username = user
+
+    # Reset cooldown by setting last_claim to a very old date
+    old_date = datetime.fromisoformat('2000-01-01 00:00:00')
+    cursor.execute('''
+        INSERT OR REPLACE INTO hourly_bonus (user_id, last_claim, total_claimed)
+        VALUES (?, ?, COALESCE((SELECT total_claimed FROM hourly_bonus WHERE user_id = ?), 0))
+    ''', (user_id, old_date, user_id))
+
+    conn.commit()
+    conn.close()
+
+    user_display = f"@{username}" if username else f"User {user_id}"
+    
+    await update.message.reply_text(
+        f"✅ Bonus cooldown reset for {user_display}!\n\n"
+        f"They can now claim the hourly bonus immediately.\n"
+        f"Current bonus amount: {HOURLY_BONUS_AMOUNT} ብር"
+    )
+
+    # Notify the user
+    try:
+        await context.bot.send_message(
+            user_id,
+            f"🎉 <b>Your hourly bonus cooldown has been reset!</b>\n\n"
+            f"You can now claim your {HOURLY_BONUS_AMOUNT} ብር hourly bonus immediately.\n\n"
+            f"Click on <b>🎁 Hourly Bonus</b> in the main menu to claim it!",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Could not notify user {user_id}: {e}")
+
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Only allow the admin to use this
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
+    
+    cooldown_hours = HOURLY_BONUS_COOLDOWN / 3600
 
     text = (
         "🛠 <b>Admin Panel</b>\n\n"
@@ -3540,6 +3848,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/remove_money &lt;user_id&gt; &lt;amount&gt;</code> – Remove money from user.\n"
         "<code>/clear_balance &lt;user_id&gt;</code> – Reset user balance to $0.\n\n"
         "<code>/edit_user_phone &lt;user_id&gt; &lt;phone&gt;</code> – Edit user's phone number.\n\n"
+         "🎁 <b>Hourly Bonus Management</b>\n"
+        f"<code>/set_hourly_bonus &lt;amount&gt;</code> – Set bonus amount (current: {HOURLY_BONUS_AMOUNT} birr)\n"
+        f"<code>/set_bonus_cooldown &lt;hours&gt;</code> – Set cooldown (current: {cooldown_hours} hours)\n"
+        "<code>/bonus_stats</code> – View hourly bonus statistics\n\n"
          "📢 <b>Channel Management</b>\n"
         "<code>/add_required_channel &lt;@username&gt; &lt;name&gt;</code> – Add required channel.\n"
         "<code>/remove_required_channel &lt;@username&gt;</code> – Remove required channel.\n"
@@ -3575,6 +3887,10 @@ def main():
     application.add_handler(CommandHandler("user_stats", user_stats))
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("change_phone", change_phone))
+    application.add_handler(CommandHandler("set_hourly_bonus", set_hourly_bonus))
+    application.add_handler(CommandHandler("set_bonus_cooldown", set_bonus_cooldown))
+    application.add_handler(CommandHandler("bonus_stats", bonus_stats))
+    application.add_handler(CommandHandler("reset_bonus_cooldown", reset_bonus_cooldown))
     application.add_handler(CommandHandler("channel_stats", channel_stats)) 
     application.add_handler(CommandHandler("edit_user_phone", edit_user_phone))
     application.add_handler(CommandHandler("edit_phone", edit_phone))  # New command
